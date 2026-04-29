@@ -70,6 +70,7 @@
 #include <QTextCursor>
 #include <QTextEdit>
 #include <QUrl>
+#include <QVariantAnimation>
 #include <QVariant>
 #include <QVBoxLayout>
 
@@ -121,6 +122,14 @@ QColor terminalPresetColor(const QString& key) {
     if (normalized == QStringLiteral("cyan")) return QColor("#7ed8e7");
     if (normalized == QStringLiteral("white")) return QColor("#eef2f6");
     return QColor("#8ff0c8");
+}
+
+QColor blendColor(const QColor& from, const QColor& to, qreal factor) {
+    const qreal clamped = std::clamp(factor, 0.0, 1.0);
+    return QColor(
+        from.red() + static_cast<int>((to.red() - from.red()) * clamped),
+        from.green() + static_cast<int>((to.green() - from.green()) * clamped),
+        from.blue() + static_cast<int>((to.blue() - from.blue()) * clamped));
 }
 
 QTextCharFormat defaultTerminalFormat(const QColor& foreground = QColor("#8ff0c8")) {
@@ -332,28 +341,9 @@ public:
 
         root->addLayout(form);
 
-        auto* actions = new QHBoxLayout();
-        auto* updateButton = new QPushButton(QStringLiteral("Обновить базу"), this);
-        auto* openFolderButton = new QPushButton(QStringLiteral("Открыть папку данных"), this);
-        actions->addWidget(updateButton);
-        actions->addWidget(openFolderButton);
-        actions->addStretch(1);
-        root->addLayout(actions);
-
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
         root->addWidget(buttons);
 
-        connect(updateButton, &QPushButton::clicked, this, [this]() {
-            m_vendorStatus->setText(QStringLiteral("Обновление..."));
-            const bool ok = m_vendorDb->updateFromNetwork();
-            m_vendorStatus->setText(m_vendorDb->statusText());
-            if (!ok) {
-                QMessageBox::warning(this, QStringLiteral("База вендоров"), QStringLiteral("Не удалось обновить базу вендоров."));
-            }
-        });
-        connect(openFolderButton, &QPushButton::clicked, this, []() {
-            QDesktopServices::openUrl(QUrl::fromLocalFile(nt::AppPaths::appDataDir()));
-        });
         connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
             m_settings->setValue(QStringLiteral("scan_workers"), m_workersSpin->value());
             m_settings->setValue(QStringLiteral("scan_on_startup"), m_scanOnStartupCheck->isChecked());
@@ -380,7 +370,7 @@ private:
     QLabel* m_vendorStatus {nullptr};
 };
 
-}
+} // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -805,6 +795,14 @@ void MainWindow::applyStyleSheet() {
             border-radius:8px;
             padding:6px;
         }
+        QPushButton#httpSendButton {
+            min-width:190px;
+            max-width:190px;
+            min-height:26px;
+            max-height:26px;
+            border-radius:8px;
+            font-weight:600;
+        }
         QLineEdit, QComboBox, QSpinBox { min-height:20px; max-height:20px; padding:1px 5px; font-size:11px; }
         QListWidget::item { padding:4px 6px; }
         QListWidget::item:selected { background:#d3dfec; }
@@ -864,6 +862,14 @@ void MainWindow::applyStyleSheet() {
         QTextEdit#httpResponsePanel {
             border-radius:8px;
             padding:6px;
+        }
+        QPushButton#httpSendButton {
+            min-width:190px;
+            max-width:190px;
+            min-height:26px;
+            max-height:26px;
+            border-radius:8px;
+            font-weight:600;
         }
         QLineEdit, QComboBox, QSpinBox {
             min-height:20px;
@@ -956,6 +962,37 @@ QColor MainWindow::terminalTextColor() const {
 
 QTextCharFormat MainWindow::sessionBaseTerminalFormat() const {
     return defaultTerminalFormat(terminalTextColor());
+}
+
+void MainWindow::animateScanButtonPulse() {
+    if (m_scanStartButton == nullptr || m_scanner->isRunning()) {
+        return;
+    }
+    const QColor baseBackground = isLightTheme() ? QColor("#dde3ea") : QColor("#242c36");
+    const QColor baseBorder = isLightTheme() ? QColor("#aab4c0") : QColor("#455262");
+    const QColor pulseBackground = isLightTheme() ? QColor("#c7efd5") : QColor("#3f6454");
+    const QColor pulseBorder = isLightTheme() ? QColor("#59a277") : QColor("#86d0a3");
+    auto* animation = new QVariantAnimation(m_scanStartButton);
+    animation->setDuration(420);
+    animation->setStartValue(0.0);
+    animation->setEndValue(1.0);
+    connect(animation, &QVariantAnimation::valueChanged, this, [this, baseBackground, baseBorder, pulseBackground, pulseBorder](const QVariant& value) {
+        const qreal raw = value.toReal();
+        const qreal blend = raw <= 0.5 ? raw * 2.0 : (1.0 - raw) * 2.0;
+        const QColor background = blendColor(baseBackground, pulseBackground, blend);
+        const QColor border = blendColor(baseBorder, pulseBorder, blend);
+        m_scanStartButton->setStyleSheet(QStringLiteral(
+            "QPushButton#scanStartButton {"
+            " font-size:11px; min-width:132px; max-width:132px; min-height:20px; max-height:20px;"
+            " padding:0px 8px; font-weight:700; color:%3; background:%1; border:1px solid %2; }")
+            .arg(background.name(), border.name(), isLightTheme() ? QStringLiteral("#183025") : QStringLiteral("#ecfff3")));
+    });
+    connect(animation, &QVariantAnimation::finished, m_scanStartButton, [this]() {
+        if (m_scanStartButton != nullptr) {
+            m_scanStartButton->setStyleSheet(QString());
+        }
+    });
+    animation->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void MainWindow::refreshTerminalFormats() {
@@ -1106,7 +1143,8 @@ QWidget* MainWindow::createScanPage() {
         if (m_scanner->isRunning()) {
             stopScan();
         } else {
-            startScan();
+            animateScanButtonPulse();
+            QTimer::singleShot(45, this, &MainWindow::startScan);
         }
     });
     connect(m_scanStopButton, &QPushButton::clicked, this, &MainWindow::stopScan);
@@ -1256,18 +1294,33 @@ QWidget* MainWindow::createRequestPage() {
     tabs->addTab(m_requestHeadersEdit, QStringLiteral("Заголовки"));
     tabs->addTab(m_requestParamsEdit, QStringLiteral("Параметры"));
     tabs->addTab(m_requestBodyEdit, QStringLiteral("Тело"));
+    auto* historyPlaceholder = new QWidget(tabs);
+    tabs->addTab(historyPlaceholder, QStringLiteral("History"));
+    tabs->setProperty("lastRealRequestTab", 0);
     controlsLayout->addWidget(tabs, 1);
 
     auto* actions = new QHBoxLayout();
-    auto* historyButton = new QPushButton(QStringLiteral("History"), controls);
     auto* sendButton = new QPushButton(QStringLiteral("Отправить запрос"), controls);
-    actions->addWidget(historyButton);
+    sendButton->setObjectName(QStringLiteral("httpSendButton"));
     actions->addStretch(1);
     actions->addWidget(sendButton);
+    actions->addStretch(1);
     controlsLayout->addLayout(actions);
 
     connect(sendButton, &QPushButton::clicked, this, &MainWindow::sendHttpRequest);
-    connect(historyButton, &QPushButton::clicked, this, &MainWindow::openHttpHistory);
+    connect(tabs, &QTabWidget::currentChanged, this, [this, tabs, historyPlaceholder](int index) {
+        const int historyIndex = tabs->indexOf(historyPlaceholder);
+        if (index == historyIndex) {
+            const int fallbackIndex = qBound(0, tabs->property("lastRealRequestTab").toInt(), qMax(0, historyIndex - 1));
+            {
+                QSignalBlocker blocker(tabs);
+                tabs->setCurrentIndex(fallbackIndex);
+            }
+            openHttpHistory();
+            return;
+        }
+        tabs->setProperty("lastRealRequestTab", index);
+    });
     root->addWidget(controls, 2);
     return page;
 }
@@ -1683,18 +1736,6 @@ void MainWindow::configureMenuBar() {
     mainMenu->setNativeMenuBar(false);
     mainMenu->clear();
 
-    auto* scanMenu = mainMenu->addMenu(QStringLiteral("Сканирование"));
-    scanMenu->addAction(QStringLiteral("Старт"), this, [this]() {
-        syncCurrentPage(0);
-        startScan();
-    });
-    scanMenu->addAction(QStringLiteral("Стоп"), this, &MainWindow::stopScan);
-    scanMenu->addSeparator();
-    scanMenu->addAction(QStringLiteral("Сохранить снимок"), this, &MainWindow::saveSnapshot);
-    scanMenu->addAction(QStringLiteral("Сравнить с базой"), this, &MainWindow::compareSnapshot);
-    scanMenu->addSeparator();
-    scanMenu->addAction(QStringLiteral("Автодиапазон"), this, &MainWindow::applySuggestedRange);
-
     auto* goToMenu = mainMenu->addMenu(QStringLiteral("Функции"));
     const QList<QPair<QString, int>> pages {
         {QStringLiteral("Сканер IP"), 0},
@@ -1709,7 +1750,8 @@ void MainWindow::configureMenuBar() {
         goToMenu->addAction(item.first, this, [this, index = item.second]() { syncCurrentPage(index); });
     }
 
-    auto* commandsMenu = mainMenu->addMenu(QStringLiteral("Команды"));
+    auto* commandsMenu = mainMenu->addMenu(QStringLiteral("Обновление"));
+    commandsMenu->addAction(QStringLiteral("Автодиапазон"), this, &MainWindow::applySuggestedRange);
     commandsMenu->addAction(QStringLiteral("Обновить диапазон"), this, &MainWindow::resolveHostnameRange);
     commandsMenu->addAction(QStringLiteral("Обновить адаптеры"), this, &MainWindow::reloadAdapters);
 
@@ -1892,7 +1934,7 @@ void MainWindow::startScan() {
     if (m_scanOnlineLabel != nullptr) {
         m_scanOnlineLabel->setText(QStringLiteral("Онлайн: 0"));
     }
-    m_vendorDb->ensureReady(true);
+    m_vendorDb->ensureReady(false);
     updateScanFooter(QStringLiteral("Сканирование..."));
     if (m_scanFooterThreadsLabel != nullptr) {
         m_scanFooterThreadsLabel->setText(QStringLiteral("Потоки: %1").arg(m_settings->scanWorkers()));
@@ -1945,7 +1987,7 @@ void MainWindow::saveSnapshot() {
 void MainWindow::compareSnapshot() {
     const auto snapshots = m_snapshots->listSnapshots();
     if (snapshots.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("Сравнение с базой"), QStringLiteral("Сохраненных снимков пока нет."));
+        QMessageBox::information(this, QStringLiteral("Сравнение со снимком"), QStringLiteral("Сохраненных снимков пока нет."));
         return;
     }
 
@@ -1955,7 +1997,7 @@ void MainWindow::compareSnapshot() {
     }
 
     bool ok = false;
-    const QString choice = QInputDialog::getItem(this, QStringLiteral("Сравнение с базой"), QStringLiteral("Сохраненные снимки"), options, 0, false, &ok);
+    const QString choice = QInputDialog::getItem(this, QStringLiteral("Сравнение со снимком"), QStringLiteral("Сохраненные снимки"), options, 0, false, &ok);
     if (!ok || choice.isEmpty()) {
         return;
     }
@@ -1971,7 +2013,7 @@ void MainWindow::compareSnapshotPath(const QString& path) {
     QString error;
     const auto rows = m_snapshots->loadSnapshotRows(path, &meta, &error);
     if (!error.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Сравнение с базой"), error);
+        QMessageBox::warning(this, QStringLiteral("Сравнение со снимком"), error);
         return;
     }
 
@@ -1985,13 +2027,14 @@ void MainWindow::refreshFavoritesMenu() {
     }
     m_favoritesMenu->clear();
     m_favoritesMenu->addAction(QStringLiteral("Сохранить текущий снимок"), this, &MainWindow::saveSnapshot);
-    m_favoritesMenu->addSeparator();
+    m_favoritesMenu->addAction(QStringLiteral("Сравнить со снимком..."), this, &MainWindow::compareSnapshot);
     const auto snapshots = m_snapshots->listSnapshots();
     if (snapshots.isEmpty()) {
         auto* emptyAction = m_favoritesMenu->addAction(QStringLiteral("Пока пусто"));
         emptyAction->setEnabled(false);
         return;
     }
+    m_favoritesMenu->addSeparator();
     for (const auto& snapshot : snapshots) {
         const QString label = QStringLiteral("%1 | %2 | %3").arg(snapshot.name, snapshot.createdAt.left(19), QString::number(snapshot.rowCount));
         m_favoritesMenu->addAction(label, this, [this, path = snapshot.path]() { compareSnapshotPath(path); });
@@ -2007,9 +2050,9 @@ void MainWindow::showSnapshotDiffDialog(const nt::SnapshotMeta& meta, const nt::
     auto* root = new QVBoxLayout(dialog);
     auto* chips = new QHBoxLayout();
 
-    const auto addChip = [this, chips](const QString& text, const QColor& color) {
+    const auto addChip = [chips](const QString& text, const QColor& color) {
         auto* label = new QLabel(text);
-        label->setStyleSheet(QStringLiteral("QLabel { background:%1; color:#0f1318; border-radius:6px; padding:6px 10px; font-weight:700; }").arg(color.name()));
+        label->setStyleSheet(QStringLiteral("QLabel { color:%1; font-weight:700; padding:2px 4px; }").arg(color.name()));
         chips->addWidget(label);
     };
 
@@ -2039,23 +2082,21 @@ void MainWindow::showSnapshotDiffDialog(const nt::SnapshotMeta& meta, const nt::
     for (int row = 0; row < summary.entries.size(); ++row) {
         const auto& entry = summary.entries.at(row);
         QString kindLabel;
-        QColor bg;
-        QColor fg("#111111");
+        QColor fg;
         if (entry.kind == nt::SnapshotDiffKind::Added) {
             kindLabel = QStringLiteral("+ Added");
-            bg = QColor("#6fd27f");
+            fg = QColor("#6fd27f");
         } else if (entry.kind == nt::SnapshotDiffKind::Removed) {
             kindLabel = QStringLiteral("- Removed");
-            bg = QColor("#ef7b7b");
+            fg = QColor("#ef7b7b");
         } else {
             kindLabel = QStringLiteral("~ Changed");
-            bg = QColor("#f2c36a");
+            fg = QColor("#f2c36a");
         }
         const QStringList columns {kindLabel, entry.ip, entry.beforeValue, entry.afterValue, entry.details};
         for (int col = 0; col < columns.size(); ++col) {
             auto* item = new QTableWidgetItem(columns.at(col));
             if (col == 0) {
-                item->setBackground(bg);
                 item->setForeground(fg);
                 QFont font = item->font();
                 font.setBold(true);

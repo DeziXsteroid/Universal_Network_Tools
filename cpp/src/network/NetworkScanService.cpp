@@ -3,6 +3,7 @@
 #include "core/AppPaths.h"
 #include "core/VendorDbService.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QHash>
@@ -282,7 +283,7 @@ QString formatPingDisplay(const QString& value) {
     return QStringLiteral("%1 ms").arg(qMax(1, qRound(pingMs)));
 }
 
-}
+} // namespace
 
 NetworkScanService::NetworkScanService(VendorDbService* vendorDb, QObject* parent)
     : QObject(parent)
@@ -419,6 +420,7 @@ void NetworkScanService::start(const QString& startIp, const QString& endIp, con
         provisional.typeHint = QStringLiteral("Хост");
         emit recordReady(provisional);
     }
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     m_prefetchedPingDisplay = sweepPingRange(startIp, endIp, adapter);
     if (m_prefetchedPingDisplay.isEmpty() && !prefetchedIps.isEmpty()) {
@@ -860,4 +862,4 @@ bool NetworkScanService::isOnLink(const QString& ip, const AdapterInfo& adapter)
     return (hostIp & mask) == (adapterIp & mask);
 }
 
-}
+} // namespace nt

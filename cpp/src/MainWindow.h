@@ -116,6 +116,7 @@ private:
     void resolveHostnameRange();
     bool isLightTheme() const;
     void refreshScanTableColors();
+    void animateScanButtonPulse();
     void startScan();
     void stopScan();
     void saveSnapshot();
