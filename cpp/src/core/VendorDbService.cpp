@@ -252,7 +252,9 @@ bool VendorDbService::parseManuf(const QByteArray& data) {
             continue;
         }
 
-        const QString vendor = parts.mid(1).join(QLatin1Char(' ')).trimmed();
+        const QString vendor = (parts.size() >= 3
+            ? parts.mid(2).join(QLatin1Char(' '))
+            : parts.at(1)).trimmed();
         if (vendor.isEmpty()) {
             continue;
         }

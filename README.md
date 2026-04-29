@@ -7,7 +7,7 @@
 <br>
 <br>
 
-[![Download for macOS](https://img.shields.io/badge/Download-macOS%20Apple%20Silicon-111111?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/DeziXsteroid/Universal_Network_Tools/releases/download/v1.0/Network-Tools-macos-apple-silicon.dmg)
+[![Download for macOS](https://img.shields.io/badge/Download-macOS%20Apple%20Silicon-111111?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/DeziXsteroid/Universal_Network_Tools/releases/latest/download/Network-Tools-macos-apple-silicon.dmg)
 
 </div>
 
@@ -15,7 +15,7 @@
 
 ## Install from Terminal
 
-<code>curl -L "https://github.com/DeziXsteroid/Universal_Network_Tools/releases/download/v1.0/Network-Tools-macos-apple-silicon.dmg" -o "Network-Tools-macos-apple-silicon.dmg"</code><br>
+<code>curl -L "https://github.com/DeziXsteroid/Universal_Network_Tools/releases/latest/download/Network-Tools-macos-apple-silicon.dmg" -o "Network-Tools-macos-apple-silicon.dmg"</code><br>
 <code>hdiutil attach "Network-Tools-macos-apple-silicon.dmg"</code><br>
 <code>cp -R "/Volumes/Network Tools/Network Tools.app" "/Applications/Network Tools.app"</code>
 

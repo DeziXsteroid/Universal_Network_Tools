@@ -71,9 +71,9 @@ QString systemCommandPath(const QString& program) {
     if (program == QStringLiteral("arp")) return QStringLiteral("/usr/sbin/arp");
     if (program == QStringLiteral("netstat")) return QStringLiteral("/usr/sbin/netstat");
     if (program == QStringLiteral("fping")) {
+        if (QFileInfo::exists(QStringLiteral("/usr/bin/fping"))) return QStringLiteral("/usr/bin/fping");
         const QString bundled = AppPaths::bundledToolPath(QStringLiteral("fping"));
         if (QFileInfo::exists(bundled)) return bundled;
-        if (QFileInfo::exists(QStringLiteral("/usr/bin/fping"))) return QStringLiteral("/usr/bin/fping");
     }
 #elif defined(Q_OS_LINUX)
     if (program == QStringLiteral("ping")) {
@@ -578,44 +578,60 @@ QHash<QString, QString> NetworkScanService::sweepPingRange(const QString& startI
         return alive;
     }
 
-    QStringList args {
+    const QList<QString> ips = expandRange(startIp, endIp);
+    if (ips.isEmpty()) {
+        return alive;
+    }
+
+    static const QRegularExpression lineRe(QStringLiteral("^\\s*(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s*:\\s*(.+)$"));
+    static const QRegularExpression timeRe(QStringLiteral("([0-9]+(?:\\.[0-9]+)?)\\s*ms"),
+                                           QRegularExpression::CaseInsensitiveOption);
+
+    QStringList baseArgs {
         QStringLiteral("-C"), QStringLiteral("1"),
         QStringLiteral("-r0"),
         QStringLiteral("-t220"),
         QStringLiteral("-i1"),
     };
-    if (!adapter.id.trimmed().isEmpty()) {
-        args << QStringLiteral("-I") << adapter.id;
+#ifdef Q_OS_MACOS
+    if (!adapter.ip.trimmed().isEmpty()) {
+        baseArgs << QStringLiteral("-S") << adapter.ip.trimmed();
     }
-    args << QStringLiteral("-g") << startIp << endIp;
+#endif
 
-    int exitStatus = -1;
-    const QString output = runCommandCapture(fping, args, true, &exitStatus);
-    Q_UNUSED(exitStatus)
+    constexpr int chunkSize = 64;
+    for (int index = 0; index < ips.size(); index += chunkSize) {
+        QStringList args = baseArgs;
+        const int limit = qMin(index + chunkSize, ips.size());
+        for (int ipIndex = index; ipIndex < limit; ++ipIndex) {
+            args << ips.at(ipIndex);
+        }
 
-    static const QRegularExpression lineRe(QStringLiteral("^\\s*(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s*:\\s*(.+)$"));
-    static const QRegularExpression timeRe(QStringLiteral("([0-9]+(?:\\.[0-9]+)?)\\s*ms"),
-                                           QRegularExpression::CaseInsensitiveOption);
-    for (const QString& rawLine : output.split(QLatin1Char('\n'))) {
-        const auto lineMatch = lineRe.match(rawLine);
-        if (!lineMatch.hasMatch()) {
-            continue;
-        }
-        const QString ip = lineMatch.captured(1);
-        const QString tail = lineMatch.captured(2).trimmed();
-        if (tail.isEmpty()
-            || tail == QStringLiteral("-")
-            || tail.contains(QStringLiteral("timed out"), Qt::CaseInsensitive)) {
-            continue;
-        }
-        const auto timeMatch = timeRe.match(tail);
-        if (timeMatch.hasMatch()) {
-            alive.insert(ip, QStringLiteral("%1 ms").arg(qMax(1, qRound(timeMatch.captured(1).toDouble()))));
-            continue;
-        }
-        const QString compactDisplay = formatPingDisplay(tail);
-        if (!compactDisplay.isEmpty()) {
-            alive.insert(ip, compactDisplay);
+        int exitStatus = -1;
+        const QString output = runCommandCapture(fping, args, true, &exitStatus);
+        Q_UNUSED(exitStatus)
+
+        for (const QString& rawLine : output.split(QLatin1Char('\n'))) {
+            const auto lineMatch = lineRe.match(rawLine);
+            if (!lineMatch.hasMatch()) {
+                continue;
+            }
+            const QString ip = lineMatch.captured(1);
+            const QString tail = lineMatch.captured(2).trimmed();
+            if (tail.isEmpty()
+                || tail == QStringLiteral("-")
+                || tail.contains(QStringLiteral("timed out"), Qt::CaseInsensitive)) {
+                continue;
+            }
+            const auto timeMatch = timeRe.match(tail);
+            if (timeMatch.hasMatch()) {
+                alive.insert(ip, QStringLiteral("%1 ms").arg(qMax(1, qRound(timeMatch.captured(1).toDouble()))));
+                continue;
+            }
+            const QString compactDisplay = formatPingDisplay(tail);
+            if (!compactDisplay.isEmpty()) {
+                alive.insert(ip, compactDisplay);
+            }
         }
     }
     return alive;
