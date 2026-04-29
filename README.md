@@ -1,6 +1,6 @@
 <div align="center">
 
-# Universal Network Tools
+# Universal Network Tools - control your network
 
 <img src="docs/assets/network-tools-scan.png" alt="Network Tools" width="960">
 
