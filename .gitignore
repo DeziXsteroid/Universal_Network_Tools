@@ -1,0 +1,6 @@
+.DS_Store
+cpp/build/
+cpp/dist/
+cpp/.venv-packaging/
+*.user
+*.tmp

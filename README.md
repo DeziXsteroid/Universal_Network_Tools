@@ -1,45 +1,43 @@
-## Загрузка последней версии (0.9)
+<div align="center">
 
-<p align="center">
-  <a href="https://github.com/DeziXsteroid/Network-Tools-VTS-/releases/download/0.9_Beta/VTScanner.exe">
-    <img alt="Download" src="https://img.shields.io/badge/GitHub-Download%20VTScanner.exe-24292e?style=for-the-badge&logo=github">
-  </a>
-</p>
+# Network Tools
 
-##  Функционал VTScanner
+<img src="docs/assets/network-tools-scan.png" alt="Network Tools" width="960">
 
-| Модуль | Что делает | Где используется |
-|---|---|---|
-| IP Scan | скан диапазона, ping, таблица устройств | быстрый поиск устройств в сети |
-| UDP/TCP/Serial | Отправка данных и команд | Управление оборудованием и тест протокола|
-| Send Request | Отправка запросов по ссылке или ip | Тест запроса и доступа |
-| Logs | единый вывод событий/ответов | удобно отлаживать и сохранять результаты |
+<br>
+<br>
 
----
+[![Download for macOS](https://img.shields.io/badge/Download-macOS%20Apple%20Silicon-111111?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/DeziXsteroid/Universal_Network_Tools/releases/download/v1.0/Network-Tools-macos-apple-silicon.dmg)
 
-## Послденее обновление (0.9 Beta)
-- Улучшение UDP/TCP раздела.
-- Поддержка 3+ новых протоколов.
-- Редизайн страниц.
-- Выбор сетевого адаптера.
-- Улучшение базы данных, которая не работала в 0.8.
-- Улучшение интерфейса.
+</div>
 
----
+<div align="center">
 
-##  Как пользоваться
+## Install from Terminal
 
-### IP Scan
-- Введите ваш диапозон
-- Нажми **Scan**
-- Смотрите результаты в таблице
-- Выберите нужный адаптер или включите автоскан в настройках
+<code>curl -L "https://github.com/DeziXsteroid/Universal_Network_Tools/releases/download/v1.0/Network-Tools-macos-apple-silicon.dmg" -o "Network-Tools-macos-apple-silicon.dmg"</code><br>
+<code>hdiutil attach "Network-Tools-macos-apple-silicon.dmg"</code><br>
+<code>cp -R "/Volumes/Network Tools/Network Tools.app" "/Applications/Network Tools.app"</code>
 
-### TCP/UDP/Serial
-- Укажите ip и порт для разделов TCP/UDP и отправляйте команды
-- Укажите верный настройки и выберите ваш порт в Serial разделе
+</div>
 
-### Send Request
-- Выбери тип: **TCP / UDP / Serial**
-- Укажи адрес/порт/COM и payload
-- Жми **Send** → ответ будет в логах
+<div align="center">
+
+## About
+
+Professional desktop utility for network discovery, device inspection, transport testing, and remote session work.<br>
+The application is focused on fast scanning, compact control panels, stable native behavior, and a clean production-style interface.
+
+</div>
+
+<div align="center">
+
+## What It Does
+
+Fast IP scanning with MAC, vendor, gateway, and open port detection.<br>
+SSH and Telnet sessions with saved profiles and interactive terminal input.<br>
+HTTP request testing for service diagnostics and API checks.<br>
+Serial, TCP, and UDP communication with text and HEX exchange modes.<br>
+Saved transport presets, interface settings, and scan behavior controls.
+
+</div>

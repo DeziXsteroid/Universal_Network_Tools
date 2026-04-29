@@ -1,0 +1,55 @@
+#include "network/HttpRequestService.h"
+
+#include <QJsonDocument>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QTimer>
+#include <QUrl>
+#include <QUrlQuery>
+
+namespace nt {
+
+HttpRequestService::HttpRequestService(QObject* parent)
+    : QObject(parent)
+    , m_manager(new QNetworkAccessManager(this)) {
+}
+
+void HttpRequestService::send(const HttpRequestSpec& spec) {
+    QUrl url(spec.url);
+    QUrlQuery query(url);
+    for (auto it = spec.params.begin(); it != spec.params.end(); ++it) {
+        query.addQueryItem(it.key(), it->toVariant().toString());
+    }
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setTransferTimeout(spec.timeoutSec * 1000);
+    for (auto it = spec.headers.begin(); it != spec.headers.end(); ++it) {
+        request.setRawHeader(it.key().toUtf8(), it->toVariant().toString().toUtf8());
+    }
+
+    if (!spec.username.isEmpty()) {
+        const QByteArray token = QStringLiteral("%1:%2").arg(spec.username, spec.password).toUtf8().toBase64();
+        request.setRawHeader("Authorization", "Basic " + token);
+    }
+
+    const QByteArray method = spec.method.trimmed().isEmpty() ? QByteArrayLiteral("GET") : spec.method.toUpper().toUtf8();
+    QNetworkReply* reply = m_manager->sendCustomRequest(request, method, spec.body);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        HttpResponse response;
+        response.statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        response.body = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            response.errorText = reply->errorString();
+        }
+        const auto headers = reply->rawHeaderPairs();
+        for (const auto& header : headers) {
+            response.headers.insert(QString::fromUtf8(header.first), QString::fromUtf8(header.second));
+        }
+        emit finished(response);
+        reply->deleteLater();
+    });
+}
+
+}
