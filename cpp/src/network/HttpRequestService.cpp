@@ -4,6 +4,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -16,7 +17,11 @@ HttpRequestService::HttpRequestService(QObject* parent)
 }
 
 void HttpRequestService::send(const HttpRequestSpec& spec) {
-    QUrl url(spec.url);
+    QString rawUrl = spec.url.trimmed();
+    if (!rawUrl.contains(QRegularExpression(QStringLiteral("^[a-zA-Z][a-zA-Z0-9+.-]*://")))) {
+        rawUrl.prepend(QStringLiteral("http://"));
+    }
+    QUrl url = QUrl::fromUserInput(rawUrl);
     QUrlQuery query(url);
     for (auto it = spec.params.begin(); it != spec.params.end(); ++it) {
         query.addQueryItem(it.key(), it->toVariant().toString());
@@ -36,10 +41,13 @@ void HttpRequestService::send(const HttpRequestSpec& spec) {
 
     const QByteArray method = spec.method.trimmed().isEmpty() ? QByteArrayLiteral("GET") : spec.method.toUpper().toUtf8();
     QNetworkReply* reply = m_manager->sendCustomRequest(request, method, spec.body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, url, method]() {
         HttpResponse response;
         response.statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         response.body = reply->readAll();
+        response.method = QString::fromUtf8(method);
+        response.url = url.toString();
+        response.reasonPhrase = reply->attribute(QNetworkRequest::HttpReasonPhraseAttribute).toString();
         if (reply->error() != QNetworkReply::NoError) {
             response.errorText = reply->errorString();
         }

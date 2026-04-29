@@ -396,11 +396,39 @@ void NetworkScanService::start(const QString& startIp, const QString& endIp, con
     QThreadPool::globalInstance()->setMaxThreadCount(qBound(8, maxWorkers, 96));
     m_activeAdapter = adapterById(adapterId);
     const auto adapter = m_activeAdapter;
+    emit scanStarted();
     m_cachedGateway = detectGateway(adapter);
     m_cachedMask = detectMask(adapter);
-    m_prefetchedPingDisplay = sweepPingRange(startIp, endIp, adapter);
     m_prefetchedMacs = captureArpTable(adapter.id);
-    emit scanStarted();
+    QList<QString> prefetchedIps = m_prefetchedMacs.keys();
+    std::sort(prefetchedIps.begin(), prefetchedIps.end(), [](const auto& left, const auto& right) {
+        return QHostAddress(left).toIPv4Address() < QHostAddress(right).toIPv4Address();
+    });
+    for (const auto& ip : prefetchedIps) {
+        ScanRecord provisional;
+        provisional.ip = ip;
+        provisional.mac = m_prefetchedMacs.value(ip, QStringLiteral("-"));
+        provisional.vendor = m_vendorDb != nullptr ? m_vendorDb->lookupVendor(provisional.mac) : QStringLiteral("unknown vendor");
+        provisional.gateway = m_cachedGateway;
+        provisional.mask = m_cachedMask;
+        provisional.onLink = isOnLink(ip, adapter);
+        provisional.name = routeDisplayForHost(adapter, provisional);
+        provisional.status = HostStatus::Unknown;
+        provisional.pingDisplay = QStringLiteral("[n/a]");
+        provisional.port = QStringLiteral("-");
+        provisional.typeHint = QStringLiteral("Хост");
+        emit recordReady(provisional);
+    }
+
+    m_prefetchedPingDisplay = sweepPingRange(startIp, endIp, adapter);
+    if (m_prefetchedPingDisplay.isEmpty() && !prefetchedIps.isEmpty()) {
+        for (const auto& ip : prefetchedIps) {
+            const auto ping = pingHost(ip, adapter.ip);
+            if (ping.success && !ping.display.isEmpty()) {
+                m_prefetchedPingDisplay.insert(ip, ping.display);
+            }
+        }
+    }
 
     auto future = QtConcurrent::mapped(ips, [this, adapter](const QString& ip) {
         if (m_cancelRequested) {
@@ -590,7 +618,7 @@ QHash<QString, QString> NetworkScanService::sweepPingRange(const QString& startI
     QStringList baseArgs {
         QStringLiteral("-C"), QStringLiteral("1"),
         QStringLiteral("-r0"),
-        QStringLiteral("-t220"),
+        QStringLiteral("-t180"),
         QStringLiteral("-i1"),
     };
 #ifdef Q_OS_MACOS

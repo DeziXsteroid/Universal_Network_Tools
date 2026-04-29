@@ -124,12 +124,14 @@ QJsonObject SettingsService::defaultConfig() {
     return QJsonObject{
         {QStringLiteral("theme"), QStringLiteral("dark")},
         {QStringLiteral("language"), QStringLiteral("ru")},
+        {QStringLiteral("terminal_text_color"), QStringLiteral("mint")},
         {QStringLiteral("ui_scale"), 92},
         {QStringLiteral("scan_workers"), 96},
         {QStringLiteral("auto_scan_enabled"), false},
         {QStringLiteral("auto_scan_interval_sec"), 30},
         {QStringLiteral("scan_on_startup"), true},
         {QStringLiteral("vendor_auto_update"), true},
+        {QStringLiteral("http_history"), QJsonArray{}},
         {QStringLiteral("window"), QJsonObject{
             {QStringLiteral("width"), 920},
             {QStringLiteral("height"), 490},

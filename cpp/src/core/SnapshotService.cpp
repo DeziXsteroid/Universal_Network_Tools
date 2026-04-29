@@ -104,6 +104,14 @@ QString fieldValue(const ScanRecord& row, const QString& field) {
     return QStringLiteral("-");
 }
 
+QString rowHeadline(const ScanRecord& row) {
+    QStringList parts;
+    parts.append(safeText(row.mac));
+    parts.append(safeText(row.vendor));
+    parts.append(safeText(row.port));
+    return parts.join(QStringLiteral(" | "));
+}
+
 QStringList trackedFields() {
     return {
         QStringLiteral("status"),
@@ -263,12 +271,26 @@ SnapshotDiffSummary SnapshotService::diffRows(const QList<ScanRecord>& reference
     for (auto it = current.begin(); it != current.end(); ++it) {
         if (!reference.contains(it.key())) {
             ++summary.added;
+            SnapshotDiffEntry entry;
+            entry.kind = SnapshotDiffKind::Added;
+            entry.ip = it.key();
+            entry.beforeValue = QStringLiteral("-");
+            entry.afterValue = rowHeadline(it.value());
+            entry.details = QStringLiteral("Узел появился в сети");
+            summary.entries.append(entry);
         }
     }
 
     for (auto it = reference.begin(); it != reference.end(); ++it) {
         if (!current.contains(it.key())) {
             ++summary.removed;
+            SnapshotDiffEntry entry;
+            entry.kind = SnapshotDiffKind::Removed;
+            entry.ip = it.key();
+            entry.beforeValue = rowHeadline(it.value());
+            entry.afterValue = QStringLiteral("-");
+            entry.details = QStringLiteral("Узел вышел из сети");
+            summary.entries.append(entry);
         }
     }
 
@@ -278,15 +300,29 @@ SnapshotDiffSummary SnapshotService::diffRows(const QList<ScanRecord>& reference
         }
         const auto before = it.value();
         const auto after = current.value(it.key());
+        QStringList diffs;
         for (const auto& field : trackedFields()) {
             if (fieldValue(before, field) != fieldValue(after, field)) {
-                ++summary.changed;
-                break;
+                diffs.append(QStringLiteral("%1: %2 -> %3").arg(field, fieldValue(before, field), fieldValue(after, field)));
             }
         }
+        if (diffs.isEmpty()) {
+            continue;
+        }
+        ++summary.changed;
+        SnapshotDiffEntry entry;
+        entry.kind = SnapshotDiffKind::Changed;
+        entry.ip = it.key();
+        entry.beforeValue = rowHeadline(before);
+        entry.afterValue = rowHeadline(after);
+        entry.details = diffs.join(QStringLiteral("\n"));
+        summary.entries.append(entry);
     }
 
     summary.total = summary.added + summary.removed + summary.changed;
+    std::sort(summary.entries.begin(), summary.entries.end(), [](const auto& left, const auto& right) {
+        return QHostAddress(left.ip).toIPv4Address() < QHostAddress(right.ip).toIPv4Address();
+    });
     return summary;
 }
 

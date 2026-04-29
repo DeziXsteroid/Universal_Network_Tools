@@ -15,6 +15,7 @@ class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
 class QEvent;
+class QMenu;
 class QSpinBox;
 class QStackedWidget;
 class QTableWidget;
@@ -119,6 +120,9 @@ private:
     void stopScan();
     void saveSnapshot();
     void compareSnapshot();
+    void compareSnapshotPath(const QString& path);
+    void refreshFavoritesMenu();
+    void showSnapshotDiffDialog(const nt::SnapshotMeta& meta, const nt::SnapshotDiffSummary& summary);
     void clearScanTable();
     void appendScanRecord(const nt::ScanRecord& record);
     void finalizeScan(const QList<nt::ScanRecord>& records, int durationMs);
@@ -128,6 +132,7 @@ private:
     static int findRowByIp(QTableWidget* table, const QString& ip);
 
     void sendHttpRequest();
+    void openHttpHistory();
     void refreshSerialPorts();
     void toggleSerial();
     void toggleTcp();
@@ -155,6 +160,9 @@ private:
     QString* sessionDraftForBox(QTextEdit* box);
     int* sessionDraftCursorForBox(QTextEdit* box);
     QTextCharFormat* sessionTerminalFormatForBox(QTextEdit* box);
+    QTextCharFormat sessionBaseTerminalFormat() const;
+    QColor terminalTextColor() const;
+    void refreshTerminalFormats();
 
     nt::SettingsService* m_settings {nullptr};
     nt::VendorDbService* m_vendorDb {nullptr};
@@ -169,6 +177,7 @@ private:
 
     QListWidget* m_navList {nullptr};
     QStackedWidget* m_pages {nullptr};
+    QMenu* m_favoritesMenu {nullptr};
 
     QLineEdit* m_scanStartIp {nullptr};
     QLineEdit* m_scanEndIp {nullptr};
@@ -195,7 +204,7 @@ private:
     QPlainTextEdit* m_requestHeadersEdit {nullptr};
     QPlainTextEdit* m_requestParamsEdit {nullptr};
     QPlainTextEdit* m_requestBodyEdit {nullptr};
-    QPlainTextEdit* m_requestResponseEdit {nullptr};
+    QTextEdit* m_requestResponseEdit {nullptr};
 
     SerialWidgets m_serialWidgets;
     TcpWidgets m_tcpWidgets;
@@ -206,6 +215,8 @@ private:
     QString m_telnetDraft;
     int m_sshDraftCursor {0};
     int m_telnetDraftCursor {0};
+    QTextCharFormat m_sshTerminalBaseFormat;
+    QTextCharFormat m_telnetTerminalBaseFormat;
     QTextCharFormat m_sshTerminalFormat;
     QTextCharFormat m_telnetTerminalFormat;
 };

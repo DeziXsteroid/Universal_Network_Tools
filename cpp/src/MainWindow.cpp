@@ -12,6 +12,7 @@
 #include "network/TcpClientSession.h"
 #include "network/TelnetSession.h"
 #include "network/UdpSocketSession.h"
+#include "widgets/CodeEditor.h"
 
 #include <algorithm>
 #include <QAction>
@@ -46,6 +47,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QListWidgetItem>
 #include <QMessageBox>
 #include <QMenu>
 #include <QMenuBar>
@@ -59,6 +61,7 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyleFactory>
+#include <QTableWidgetSelectionRange>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QSerialPortInfo>
@@ -111,24 +114,33 @@ QColor terminalColorFromCode(int code) {
     }
 }
 
-QTextCharFormat defaultTerminalFormat() {
+QColor terminalPresetColor(const QString& key) {
+    const QString normalized = key.trimmed().toLower();
+    if (normalized == QStringLiteral("green")) return QColor("#79df71");
+    if (normalized == QStringLiteral("amber")) return QColor("#f0c86e");
+    if (normalized == QStringLiteral("cyan")) return QColor("#7ed8e7");
+    if (normalized == QStringLiteral("white")) return QColor("#eef2f6");
+    return QColor("#8ff0c8");
+}
+
+QTextCharFormat defaultTerminalFormat(const QColor& foreground = QColor("#8ff0c8")) {
     QTextCharFormat format;
     format.setFont(fixedFont());
-    format.setForeground(QColor("#eef2f6"));
+    format.setForeground(foreground);
     format.setBackground(QColor("#0f1318"));
     format.setFontWeight(QFont::Normal);
     format.setFontUnderline(false);
     return format;
 }
 
-void applyTerminalSgr(const QList<int>& codes, QTextCharFormat& format) {
+void applyTerminalSgr(const QList<int>& codes, QTextCharFormat& format, const QTextCharFormat& baseFormat) {
     if (codes.isEmpty()) {
-        format = defaultTerminalFormat();
+        format = baseFormat;
         return;
     }
     for (const int code : codes) {
         if (code == 0) {
-            format = defaultTerminalFormat();
+            format = baseFormat;
         } else if (code == 1) {
             format.setFontWeight(QFont::Bold);
         } else if (code == 22) {
@@ -138,9 +150,9 @@ void applyTerminalSgr(const QList<int>& codes, QTextCharFormat& format) {
         } else if (code == 24) {
             format.setFontUnderline(false);
         } else if (code == 39) {
-            format.setForeground(defaultTerminalFormat().foreground());
+            format.setForeground(baseFormat.foreground());
         } else if (code == 49) {
-            format.setBackground(defaultTerminalFormat().background());
+            format.setBackground(baseFormat.background());
         } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
             format.setForeground(terminalColorFromCode(code));
         } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
@@ -148,6 +160,36 @@ void applyTerminalSgr(const QList<int>& codes, QTextCharFormat& format) {
             format.setBackground(terminalColorFromCode(fgCode));
         }
     }
+}
+
+QColor httpMethodColor(const QString& method) {
+    const QString upper = method.trimmed().toUpper();
+    if (upper == QStringLiteral("GET")) return QColor("#5db0ff");
+    if (upper == QStringLiteral("POST")) return QColor("#6fd27f");
+    if (upper == QStringLiteral("PUT")) return QColor("#f2c36a");
+    if (upper == QStringLiteral("PATCH")) return QColor("#cb8cf2");
+    if (upper == QStringLiteral("DELETE")) return QColor("#ef7b7b");
+    return QColor("#d9e1eb");
+}
+
+QColor httpStatusColor(int statusCode, bool hasError) {
+    if (hasError || statusCode >= 500 || statusCode == 0) {
+        return QColor("#ef7b7b");
+    }
+    if (statusCode >= 200 && statusCode < 300) {
+        return QColor("#6fd27f");
+    }
+    return QColor("#f2c36a");
+}
+
+QString scanSnapshotSummary(const nt::ScanRecord& row) {
+    const auto normalize = [](const QString& value, const QString& fallback) {
+        return value.trimmed().isEmpty() || value == QStringLiteral("-") ? fallback : value;
+    };
+    return QStringLiteral("%1 | %2 | %3")
+        .arg(normalize(row.mac, QStringLiteral("-")))
+        .arg(normalize(row.vendor, QStringLiteral("unknown vendor")))
+        .arg(normalize(row.port, QStringLiteral("-")));
 }
 
 void appendConsole(QPlainTextEdit* box, const QString& text) {
@@ -269,6 +311,15 @@ public:
         m_languageCombo->setCurrentIndex(qMax(0, m_languageCombo->findData(settings->language())));
         form->addRow(QStringLiteral("Язык"), m_languageCombo);
 
+        m_terminalColorCombo = new QComboBox(this);
+        m_terminalColorCombo->addItem(QStringLiteral("Mint"), QStringLiteral("mint"));
+        m_terminalColorCombo->addItem(QStringLiteral("Green"), QStringLiteral("green"));
+        m_terminalColorCombo->addItem(QStringLiteral("Amber"), QStringLiteral("amber"));
+        m_terminalColorCombo->addItem(QStringLiteral("Cyan"), QStringLiteral("cyan"));
+        m_terminalColorCombo->addItem(QStringLiteral("White"), QStringLiteral("white"));
+        m_terminalColorCombo->setCurrentIndex(qMax(0, m_terminalColorCombo->findData(settings->value(QStringLiteral("terminal_text_color"), QStringLiteral("mint")).toString(QStringLiteral("mint")))));
+        form->addRow(QStringLiteral("SSH / Telnet цвет"), m_terminalColorCombo);
+
         m_vendorStatus = new QLabel(vendorDb->statusText(), this);
         m_vendorStatus->setWordWrap(true);
         m_vendorStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -308,6 +359,7 @@ public:
             m_settings->setValue(QStringLiteral("scan_on_startup"), m_scanOnStartupCheck->isChecked());
             m_settings->setValue(QStringLiteral("theme"), m_themeCombo->currentData().toString());
             m_settings->setValue(QStringLiteral("language"), m_languageCombo->currentData().toString());
+            m_settings->setValue(QStringLiteral("terminal_text_color"), m_terminalColorCombo->currentData().toString());
             m_settings->save();
             accept();
         });
@@ -324,6 +376,7 @@ private:
     QCheckBox* m_scanOnStartupCheck {nullptr};
     QComboBox* m_themeCombo {nullptr};
     QComboBox* m_languageCombo {nullptr};
+    QComboBox* m_terminalColorCombo {nullptr};
     QLabel* m_vendorStatus {nullptr};
 };
 
@@ -341,9 +394,8 @@ MainWindow::MainWindow(QWidget* parent)
     , m_tcpSession(new nt::TcpClientSession(this))
     , m_telnetSession(new nt::TelnetSession(this))
     , m_udpSession(new nt::UdpSocketSession(this)) {
-    m_sshTerminalFormat = defaultTerminalFormat();
-    m_telnetTerminalFormat = defaultTerminalFormat();
     m_settings->load();
+    refreshTerminalFormats();
     m_vendorDb->ensureReady(false);
     m_scanAutoScanTimer = new QTimer(this);
     m_scanAutoScanTimer->setSingleShot(false);
@@ -406,19 +458,43 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     connect(m_http, &nt::HttpRequestService::finished, this, [this](const nt::HttpResponse& response) {
+        if (m_requestResponseEdit == nullptr) {
+            return;
+        }
+        QTextCursor cursor(m_requestResponseEdit->document());
+        cursor.movePosition(QTextCursor::End);
+
+        QTextCharFormat statusFormat;
+        statusFormat.setFont(fixedFont());
+        statusFormat.setFontWeight(QFont::Bold);
+        statusFormat.setForeground(httpStatusColor(response.statusCode, !response.errorText.isEmpty()));
+
+        QTextCharFormat textFormat;
+        textFormat.setFont(fixedFont());
+        textFormat.setForeground(isLightTheme() ? QColor("#1f2730") : QColor("#eef2f6"));
+
+        const QString statusText = response.errorText.isEmpty()
+            ? QStringLiteral("HTTP %1 %2").arg(response.statusCode).arg(response.reasonPhrase.trimmed())
+            : QStringLiteral("ERROR %1").arg(response.errorText);
+        cursor.insertText(statusText.trimmed() + QStringLiteral("\n"), statusFormat);
+
         QString text;
         if (!response.errorText.isEmpty()) {
             text = response.errorText;
         } else {
-            text = QStringLiteral("HTTP %1\n\n").arg(response.statusCode);
             const auto parsed = QJsonDocument::fromJson(response.body);
             if (!parsed.isNull()) {
-                text += QString::fromUtf8(parsed.toJson(QJsonDocument::Indented));
+                text = QString::fromUtf8(parsed.toJson(QJsonDocument::Indented));
             } else {
-                text += QString::fromUtf8(response.body);
+                text = QString::fromUtf8(response.body);
             }
         }
-        m_requestResponseEdit->setPlainText(text);
+        if (text.trimmed().isEmpty()) {
+            text = QStringLiteral("(empty response)");
+        }
+        cursor.insertText(text + QStringLiteral("\n\n"), textFormat);
+        m_requestResponseEdit->setTextCursor(cursor);
+        m_requestResponseEdit->ensureCursorVisible();
     });
 
     connect(m_serialSession, &nt::SerialSession::dataReceived, this, [this](const QByteArray& bytes) {
@@ -725,6 +801,10 @@ void MainWindow::applyStyleSheet() {
         QListWidget, QTableWidget, QPlainTextEdit, QTextEdit, QLineEdit, QComboBox, QSpinBox, QTabWidget::pane {
             background:#ffffff; color:#1f2730; border:1px solid #bcc7d2; selection-background-color:#d3dfec; selection-color:#111111;
         }
+        QTextEdit#httpResponsePanel {
+            border-radius:8px;
+            padding:6px;
+        }
         QLineEdit, QComboBox, QSpinBox { min-height:20px; max-height:20px; padding:1px 5px; font-size:11px; }
         QListWidget::item { padding:4px 6px; }
         QListWidget::item:selected { background:#d3dfec; }
@@ -780,6 +860,10 @@ void MainWindow::applyStyleSheet() {
             border:1px solid #394451;
             selection-background-color:#39444f;
             selection-color:#ffffff;
+        }
+        QTextEdit#httpResponsePanel {
+            border-radius:8px;
+            padding:6px;
         }
         QLineEdit, QComboBox, QSpinBox {
             min-height:20px;
@@ -864,6 +948,21 @@ void MainWindow::applyStyleSheet() {
 
 bool MainWindow::isLightTheme() const {
     return m_settings->theme() == QStringLiteral("light");
+}
+
+QColor MainWindow::terminalTextColor() const {
+    return terminalPresetColor(m_settings->value(QStringLiteral("terminal_text_color"), QStringLiteral("mint")).toString(QStringLiteral("mint")));
+}
+
+QTextCharFormat MainWindow::sessionBaseTerminalFormat() const {
+    return defaultTerminalFormat(terminalTextColor());
+}
+
+void MainWindow::refreshTerminalFormats() {
+    m_sshTerminalBaseFormat = sessionBaseTerminalFormat();
+    m_telnetTerminalBaseFormat = sessionBaseTerminalFormat();
+    m_sshTerminalFormat = m_sshTerminalBaseFormat;
+    m_telnetTerminalFormat = m_telnetTerminalBaseFormat;
 }
 
 void MainWindow::refreshScanTableColors() {
@@ -1111,9 +1210,11 @@ QWidget* MainWindow::createRequestPage() {
     root->setContentsMargins(8, 8, 8, 8);
     root->setSpacing(8);
 
-    m_requestResponseEdit = new QPlainTextEdit(page);
+    m_requestResponseEdit = new QTextEdit(page);
     m_requestResponseEdit->setReadOnly(true);
     m_requestResponseEdit->setFont(fixedFont());
+    m_requestResponseEdit->setObjectName(QStringLiteral("httpResponsePanel"));
+    m_requestResponseEdit->setLineWrapMode(QTextEdit::NoWrap);
     root->addWidget(m_requestResponseEdit, 3);
 
     auto* controls = new QGroupBox(QStringLiteral("Запрос"), page);
@@ -1143,20 +1244,30 @@ QWidget* MainWindow::createRequestPage() {
     controlsLayout->addLayout(form);
 
     auto* tabs = new QTabWidget(controls);
-    m_requestHeadersEdit = new QPlainTextEdit(QStringLiteral("{\n  \"Accept\": \"application/json\"\n}"), tabs);
-    m_requestParamsEdit = new QPlainTextEdit(QStringLiteral("{}"), tabs);
-    m_requestBodyEdit = new QPlainTextEdit(QStringLiteral("{}"), tabs);
-    m_requestHeadersEdit->setFont(fixedFont());
-    m_requestParamsEdit->setFont(fixedFont());
-    m_requestBodyEdit->setFont(fixedFont());
+    auto* headersEditor = new CodeEditor(tabs);
+    auto* paramsEditor = new CodeEditor(tabs);
+    auto* bodyEditor = new CodeEditor(tabs);
+    headersEditor->setPlainText(QStringLiteral("{\n    \"Accept\": \"application/json\"\n}"));
+    paramsEditor->setPlainText(QStringLiteral("{}"));
+    bodyEditor->setPlainText(QStringLiteral("{}"));
+    m_requestHeadersEdit = headersEditor;
+    m_requestParamsEdit = paramsEditor;
+    m_requestBodyEdit = bodyEditor;
     tabs->addTab(m_requestHeadersEdit, QStringLiteral("Заголовки"));
     tabs->addTab(m_requestParamsEdit, QStringLiteral("Параметры"));
     tabs->addTab(m_requestBodyEdit, QStringLiteral("Тело"));
     controlsLayout->addWidget(tabs, 1);
 
+    auto* actions = new QHBoxLayout();
+    auto* historyButton = new QPushButton(QStringLiteral("History"), controls);
     auto* sendButton = new QPushButton(QStringLiteral("Отправить запрос"), controls);
+    actions->addWidget(historyButton);
+    actions->addStretch(1);
+    actions->addWidget(sendButton);
+    controlsLayout->addLayout(actions);
+
     connect(sendButton, &QPushButton::clicked, this, &MainWindow::sendHttpRequest);
-    controlsLayout->addWidget(sendButton);
+    connect(historyButton, &QPushButton::clicked, this, &MainWindow::openHttpHistory);
     root->addWidget(controls, 2);
     return page;
 }
@@ -1277,12 +1388,15 @@ QWidget* MainWindow::createTcpPage() {
     topLayout->setVerticalSpacing(6);
 
     m_tcpWidgets.hostEdit = new QLineEdit(QStringLiteral("127.0.0.1"), top);
+    m_tcpWidgets.hostEdit->setFixedWidth(250);
     m_tcpWidgets.portSpin = new QSpinBox(top);
     m_tcpWidgets.portSpin->setRange(1, 65535);
     m_tcpWidgets.portSpin->setValue(23);
+    m_tcpWidgets.portSpin->setFixedWidth(88);
     m_tcpWidgets.localPortSpin = new QSpinBox(top);
     m_tcpWidgets.localPortSpin->setRange(0, 65535);
     m_tcpWidgets.localPortSpin->setValue(0);
+    m_tcpWidgets.localPortSpin->setFixedWidth(88);
     m_tcpWidgets.hexCheck = new QCheckBox(QStringLiteral("HEX"), top);
     m_tcpWidgets.eolCombo = new QComboBox(top);
     m_tcpWidgets.eolCombo->addItems({QStringLiteral("Нет"), QStringLiteral("CR"), QStringLiteral("LF"), QStringLiteral("CRLF")});
@@ -1303,6 +1417,8 @@ QWidget* MainWindow::createTcpPage() {
     topLayout->addWidget(m_tcpWidgets.eolCombo, 1, 3);
     topLayout->addWidget(m_tcpWidgets.hexCheck, 1, 4);
     topLayout->addWidget(m_tcpWidgets.connectButton, 1, 5);
+    topLayout->setColumnStretch(1, 1);
+    topLayout->setColumnStretch(5, 0);
     root->addWidget(top);
 
     m_tcpWidgets.outputBox = new QTextEdit(page);
@@ -1368,12 +1484,15 @@ QWidget* MainWindow::createUdpPage() {
     topLayout->setVerticalSpacing(6);
 
     m_udpWidgets.hostEdit = new QLineEdit(QStringLiteral("127.0.0.1"), top);
+    m_udpWidgets.hostEdit->setFixedWidth(250);
     m_udpWidgets.remotePortSpin = new QSpinBox(top);
     m_udpWidgets.remotePortSpin->setRange(1, 65535);
     m_udpWidgets.remotePortSpin->setValue(52381);
+    m_udpWidgets.remotePortSpin->setFixedWidth(88);
     m_udpWidgets.localPortSpin = new QSpinBox(top);
     m_udpWidgets.localPortSpin->setRange(0, 65535);
     m_udpWidgets.localPortSpin->setValue(0);
+    m_udpWidgets.localPortSpin->setFixedWidth(88);
     m_udpWidgets.hexCheck = new QCheckBox(QStringLiteral("HEX"), top);
     m_udpWidgets.eolCombo = new QComboBox(top);
     m_udpWidgets.eolCombo->addItems({QStringLiteral("Нет"), QStringLiteral("CR"), QStringLiteral("LF"), QStringLiteral("CRLF")});
@@ -1392,6 +1511,8 @@ QWidget* MainWindow::createUdpPage() {
     topLayout->addWidget(m_udpWidgets.eolCombo, 1, 2);
     topLayout->addWidget(m_udpWidgets.hexCheck, 1, 3);
     topLayout->addWidget(m_udpWidgets.connectButton, 1, 5);
+    topLayout->setColumnStretch(1, 1);
+    topLayout->setColumnStretch(5, 0);
     root->addWidget(top);
 
     m_udpWidgets.outputBox = new QTextEdit(page);
@@ -1592,9 +1713,8 @@ void MainWindow::configureMenuBar() {
     commandsMenu->addAction(QStringLiteral("Обновить диапазон"), this, &MainWindow::resolveHostnameRange);
     commandsMenu->addAction(QStringLiteral("Обновить адаптеры"), this, &MainWindow::reloadAdapters);
 
-    auto* favoritesMenu = mainMenu->addMenu(QStringLiteral("Избранное"));
-    auto* emptyFavorites = favoritesMenu->addAction(QStringLiteral("Пока пусто"));
-    emptyFavorites->setEnabled(false);
+    m_favoritesMenu = mainMenu->addMenu(QStringLiteral("Избранное"));
+    refreshFavoritesMenu();
 
     mainMenu->addAction(QStringLiteral("Настройки"), this, &MainWindow::openSettingsDialog);
 
@@ -1673,6 +1793,7 @@ void MainWindow::syncCurrentPage(int row) {
 void MainWindow::openSettingsDialog() {
     const QString previousTheme = m_settings->theme();
     const QString previousLanguage = m_settings->language();
+    const QString previousTerminalColor = m_settings->value(QStringLiteral("terminal_text_color"), QStringLiteral("mint")).toString(QStringLiteral("mint"));
     SettingsDialog dialog(m_settings, m_vendorDb, this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
@@ -1688,6 +1809,9 @@ void MainWindow::openSettingsDialog() {
             QStringLiteral("Настройки"),
             QStringLiteral("Язык интерфейса сохранен. Для полной локализации перезапустите приложение.")
         );
+    }
+    if (previousTerminalColor != m_settings->value(QStringLiteral("terminal_text_color"), QStringLiteral("mint")).toString(QStringLiteral("mint"))) {
+        refreshTerminalFormats();
     }
 }
 
@@ -1814,6 +1938,7 @@ void MainWindow::saveSnapshot() {
         QMessageBox::warning(this, QStringLiteral("Снимки"), error);
         return;
     }
+    refreshFavoritesMenu();
     updateScanFooter(QStringLiteral("Снимок сохранен: %1").arg(path));
 }
 
@@ -1838,26 +1963,118 @@ void MainWindow::compareSnapshot() {
     if (index < 0 || index >= snapshots.size()) {
         return;
     }
+    compareSnapshotPath(snapshots.at(index).path);
+}
 
+void MainWindow::compareSnapshotPath(const QString& path) {
     nt::SnapshotMeta meta;
     QString error;
-    const auto rows = m_snapshots->loadSnapshotRows(snapshots.at(index).path, &meta, &error);
+    const auto rows = m_snapshots->loadSnapshotRows(path, &meta, &error);
     if (!error.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Сравнение с базой"), error);
         return;
     }
 
     const auto summary = m_snapshots->diffRows(rows, m_scanRows);
-    QMessageBox::information(
-        this,
-        QStringLiteral("Сравнение с базой"),
-        QStringLiteral("База: %1\nСохранено: %2\nХостов: %3\nНовых: %4\nИсчезло: %5\nИзменено: %6")
-            .arg(meta.name, meta.createdAt.left(19))
-            .arg(meta.rowCount)
-            .arg(summary.added)
-            .arg(summary.removed)
-            .arg(summary.changed)
-    );
+    showSnapshotDiffDialog(meta, summary);
+}
+
+void MainWindow::refreshFavoritesMenu() {
+    if (m_favoritesMenu == nullptr) {
+        return;
+    }
+    m_favoritesMenu->clear();
+    m_favoritesMenu->addAction(QStringLiteral("Сохранить текущий снимок"), this, &MainWindow::saveSnapshot);
+    m_favoritesMenu->addSeparator();
+    const auto snapshots = m_snapshots->listSnapshots();
+    if (snapshots.isEmpty()) {
+        auto* emptyAction = m_favoritesMenu->addAction(QStringLiteral("Пока пусто"));
+        emptyAction->setEnabled(false);
+        return;
+    }
+    for (const auto& snapshot : snapshots) {
+        const QString label = QStringLiteral("%1 | %2 | %3").arg(snapshot.name, snapshot.createdAt.left(19), QString::number(snapshot.rowCount));
+        m_favoritesMenu->addAction(label, this, [this, path = snapshot.path]() { compareSnapshotPath(path); });
+    }
+}
+
+void MainWindow::showSnapshotDiffDialog(const nt::SnapshotMeta& meta, const nt::SnapshotDiffSummary& summary) {
+    auto* dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("Diff | %1").arg(meta.name));
+    dialog->resize(980, 560);
+
+    auto* root = new QVBoxLayout(dialog);
+    auto* chips = new QHBoxLayout();
+
+    const auto addChip = [this, chips](const QString& text, const QColor& color) {
+        auto* label = new QLabel(text);
+        label->setStyleSheet(QStringLiteral("QLabel { background:%1; color:#0f1318; border-radius:6px; padding:6px 10px; font-weight:700; }").arg(color.name()));
+        chips->addWidget(label);
+    };
+
+    addChip(QStringLiteral("+ Добавлено: %1").arg(summary.added), QColor("#6fd27f"));
+    addChip(QStringLiteral("- Вышло: %1").arg(summary.removed), QColor("#ef7b7b"));
+    addChip(QStringLiteral("~ Изменено: %1").arg(summary.changed), QColor("#f2c36a"));
+    chips->addStretch(1);
+    root->addLayout(chips);
+
+    auto* info = new QLabel(QStringLiteral("%1 | %2 | Хостов в снимке: %3").arg(meta.name, meta.createdAt.left(19), QString::number(meta.rowCount)), dialog);
+    root->addWidget(info);
+
+    auto* table = new QTableWidget(dialog);
+    table->setColumnCount(5);
+    table->setHorizontalHeaderLabels({QStringLiteral("Тип"), QStringLiteral("IP"), QStringLiteral("Было"), QStringLiteral("Стало"), QStringLiteral("Детали")});
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->verticalHeader()->setVisible(false);
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+    table->setRowCount(summary.entries.size());
+
+    for (int row = 0; row < summary.entries.size(); ++row) {
+        const auto& entry = summary.entries.at(row);
+        QString kindLabel;
+        QColor bg;
+        QColor fg("#111111");
+        if (entry.kind == nt::SnapshotDiffKind::Added) {
+            kindLabel = QStringLiteral("+ Added");
+            bg = QColor("#6fd27f");
+        } else if (entry.kind == nt::SnapshotDiffKind::Removed) {
+            kindLabel = QStringLiteral("- Removed");
+            bg = QColor("#ef7b7b");
+        } else {
+            kindLabel = QStringLiteral("~ Changed");
+            bg = QColor("#f2c36a");
+        }
+        const QStringList columns {kindLabel, entry.ip, entry.beforeValue, entry.afterValue, entry.details};
+        for (int col = 0; col < columns.size(); ++col) {
+            auto* item = new QTableWidgetItem(columns.at(col));
+            if (col == 0) {
+                item->setBackground(bg);
+                item->setForeground(fg);
+                QFont font = item->font();
+                font.setBold(true);
+                item->setFont(font);
+            }
+            if (col == 4) {
+                item->setToolTip(entry.details);
+            }
+            table->setItem(row, col, item);
+        }
+    }
+
+    root->addWidget(table, 1);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    root->addWidget(buttons);
+    dialog->show();
 }
 
 void MainWindow::clearScanTable() {
@@ -2051,7 +2268,8 @@ void MainWindow::sendHttpRequest() {
         return;
     }
 
-    auto parseObject = [this](QPlainTextEdit* edit, const QString& title, bool allowEmpty = true) -> QJsonObject {
+    bool parseFailed = false;
+    auto parseObject = [this, &parseFailed](QPlainTextEdit* edit, const QString& title, bool allowEmpty = true) -> QJsonObject {
         QJsonParseError error;
         const QByteArray data = edit->toPlainText().trimmed().toUtf8();
         if (data.isEmpty() && allowEmpty) {
@@ -2059,6 +2277,7 @@ void MainWindow::sendHttpRequest() {
         }
         const auto document = QJsonDocument::fromJson(data, &error);
         if (error.error != QJsonParseError::NoError || !document.isObject()) {
+            parseFailed = true;
             QMessageBox::warning(this, QStringLiteral("HTTP / REQ"), title + QStringLiteral(" должны быть JSON-объектом."));
             return {};
         }
@@ -2068,15 +2287,127 @@ void MainWindow::sendHttpRequest() {
     nt::HttpRequestSpec spec;
     spec.method = m_requestMethodCombo->currentText();
     spec.url = m_requestUrlEdit->text().trimmed();
+    if (!spec.url.contains(QRegularExpression(QStringLiteral("^[a-zA-Z][a-zA-Z0-9+.-]*://")))) {
+        spec.url.prepend(QStringLiteral("http://"));
+    }
     spec.headers = parseObject(m_requestHeadersEdit, QStringLiteral("Заголовки"));
     spec.params = parseObject(m_requestParamsEdit, QStringLiteral("Параметры"));
+    if (parseFailed) {
+        return;
+    }
     spec.body = m_requestBodyEdit->toPlainText().toUtf8();
     spec.username = m_requestUserEdit->text().trimmed();
     spec.password = m_requestPassEdit->text();
     spec.timeoutSec = m_requestTimeoutSpin->value();
 
-    m_requestResponseEdit->setPlainText(QStringLiteral("Отправка..."));
+    QTextCursor cursor(m_requestResponseEdit->document());
+    cursor.movePosition(QTextCursor::End);
+
+    QTextCharFormat arrowFormat;
+    arrowFormat.setFont(fixedFont());
+    arrowFormat.setFontWeight(QFont::Bold);
+    arrowFormat.setForeground(QColor("#66b7ff"));
+    QTextCharFormat methodFormat = arrowFormat;
+    methodFormat.setForeground(httpMethodColor(spec.method));
+    QTextCharFormat textFormat;
+    textFormat.setFont(fixedFont());
+    textFormat.setForeground(isLightTheme() ? QColor("#1f2730") : QColor("#eef2f6"));
+
+    cursor.insertText(QStringLiteral("➜ "), arrowFormat);
+    cursor.insertText(spec.method.toUpper(), methodFormat);
+    cursor.insertText(QStringLiteral(" %1\n").arg(spec.url), textFormat);
+    m_requestResponseEdit->setTextCursor(cursor);
+    m_requestResponseEdit->ensureCursorVisible();
+
+    QJsonArray history = m_settings->value(QStringLiteral("http_history"), QJsonArray{}).toArray();
+    QJsonObject item {
+        {QStringLiteral("method"), spec.method.toUpper()},
+        {QStringLiteral("url"), spec.url},
+        {QStringLiteral("headers"), m_requestHeadersEdit->toPlainText()},
+        {QStringLiteral("params"), m_requestParamsEdit->toPlainText()},
+        {QStringLiteral("body"), m_requestBodyEdit->toPlainText()},
+        {QStringLiteral("username"), spec.username},
+        {QStringLiteral("password"), spec.password},
+        {QStringLiteral("timeout"), spec.timeoutSec},
+    };
+    QJsonArray compacted;
+    compacted.append(item);
+    for (const auto& value : history) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const auto object = value.toObject();
+        if (object.value(QStringLiteral("method")).toString() == item.value(QStringLiteral("method")).toString()
+            && object.value(QStringLiteral("url")).toString() == item.value(QStringLiteral("url")).toString()
+            && object.value(QStringLiteral("body")).toString() == item.value(QStringLiteral("body")).toString()) {
+            continue;
+        }
+        compacted.append(object);
+        if (compacted.size() >= 40) {
+            break;
+        }
+    }
+    m_settings->setValue(QStringLiteral("http_history"), compacted);
+    m_settings->save();
     m_http->send(spec);
+}
+
+void MainWindow::openHttpHistory() {
+    const QJsonArray history = m_settings->value(QStringLiteral("http_history"), QJsonArray{}).toArray();
+    if (history.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("HTTP History"), QStringLiteral("История запросов пока пуста."));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("HTTP History"));
+    dialog.resize(760, 440);
+
+    auto* root = new QVBoxLayout(&dialog);
+    auto* list = new QListWidget(&dialog);
+    root->addWidget(list, 1);
+
+    for (const auto& value : history) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const auto object = value.toObject();
+        const QString method = object.value(QStringLiteral("method")).toString();
+        const QString url = object.value(QStringLiteral("url")).toString();
+        auto* item = new QListWidgetItem(QStringLiteral("%1  %2").arg(method, url));
+        item->setData(Qt::UserRole, object);
+        item->setForeground(httpMethodColor(method));
+        QFont font = item->font();
+        font.setBold(true);
+        item->setFont(font);
+        list->addItem(item);
+    }
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto* applyButton = buttons->addButton(QStringLiteral("Повторить"), QDialogButtonBox::AcceptRole);
+    root->addWidget(buttons);
+
+    const auto applySelection = [this, list, &dialog]() {
+        auto* item = list->currentItem();
+        if (item == nullptr) {
+            return;
+        }
+        const QJsonObject object = item->data(Qt::UserRole).toJsonObject();
+        m_requestMethodCombo->setCurrentText(object.value(QStringLiteral("method")).toString(QStringLiteral("GET")));
+        m_requestUrlEdit->setText(object.value(QStringLiteral("url")).toString());
+        m_requestHeadersEdit->setPlainText(object.value(QStringLiteral("headers")).toString());
+        m_requestParamsEdit->setPlainText(object.value(QStringLiteral("params")).toString());
+        m_requestBodyEdit->setPlainText(object.value(QStringLiteral("body")).toString());
+        m_requestUserEdit->setText(object.value(QStringLiteral("username")).toString());
+        m_requestPassEdit->setText(object.value(QStringLiteral("password")).toString());
+        m_requestTimeoutSpin->setValue(object.value(QStringLiteral("timeout")).toInt(10));
+        dialog.accept();
+    };
+
+    connect(applyButton, &QPushButton::clicked, &dialog, applySelection);
+    connect(list, &QListWidget::itemDoubleClicked, &dialog, [applySelection](QListWidgetItem*) { applySelection(); });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.exec();
 }
 
 void MainWindow::refreshSerialPorts() {
@@ -2088,7 +2419,15 @@ void MainWindow::refreshSerialPorts() {
         return;
     }
     m_serialWidgets.portCombo->clear();
-    const auto ports = QSerialPortInfo::availablePorts();
+    auto ports = QSerialPortInfo::availablePorts();
+    std::sort(ports.begin(), ports.end(), [](const auto& left, const auto& right) {
+        const bool leftCu = left.portName().startsWith(QStringLiteral("cu."));
+        const bool rightCu = right.portName().startsWith(QStringLiteral("cu."));
+        if (leftCu != rightCu) {
+            return leftCu;
+        }
+        return left.portName().toLower() < right.portName().toLower();
+    });
     if (ports.isEmpty()) {
         m_serialWidgets.portCombo->addItem(QStringLiteral("(портов нет)"), QString());
         return;
@@ -2408,6 +2747,7 @@ void MainWindow::appendSessionTerminalOutput(QTextEdit* box, const QString& text
     if (format == nullptr) {
         return;
     }
+    const QTextCharFormat baseFormat = box == m_sshWidgets.outputBox ? m_sshTerminalBaseFormat : m_telnetTerminalBaseFormat;
     removeSessionDraft(box);
     QTextCursor cursor = box->textCursor();
     cursor.movePosition(QTextCursor::End);
@@ -2465,13 +2805,13 @@ void MainWindow::appendSessionTerminalOutput(QTextEdit* box, const QString& text
                     const int value = part.isEmpty() ? 0 : part.toInt(&ok);
                     codes.append(ok || part.isEmpty() ? value : 0);
                 }
-                applyTerminalSgr(codes, *format);
+                applyTerminalSgr(codes, *format, baseFormat);
             } else if (final == QLatin1Char('J')) {
                 const int mode = params.isEmpty() ? 0 : params.toInt();
                 if (mode == 2 || mode == 3) {
                     box->clear();
                     cursor = box->textCursor();
-                    *format = defaultTerminalFormat();
+                    *format = baseFormat;
                 }
             } else if (final == QLatin1Char('K')) {
                 cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);

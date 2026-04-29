@@ -51,6 +51,8 @@ add_executable(NetworkToolsQt
     src/network/SerialSession.h
     src/network/NetworkScanService.cpp
     src/network/NetworkScanService.h
+    src/widgets/CodeEditor.cpp
+    src/widgets/CodeEditor.h
     ${APP_WIN_RC}
     ${APP_MAC_ICNS}
 )

@@ -93,11 +93,26 @@ struct SnapshotMeta {
     int rowCount {0};
 };
 
+enum class SnapshotDiffKind {
+    Added,
+    Removed,
+    Changed,
+};
+
+struct SnapshotDiffEntry {
+    SnapshotDiffKind kind {SnapshotDiffKind::Changed};
+    QString ip;
+    QString beforeValue;
+    QString afterValue;
+    QString details;
+};
+
 struct SnapshotDiffSummary {
     int added {0};
     int removed {0};
     int changed {0};
     int total {0};
+    QList<SnapshotDiffEntry> entries;
 };
 
 struct HttpRequestSpec {
@@ -116,6 +131,9 @@ struct HttpResponse {
     QByteArray body;
     QJsonObject headers;
     QString errorText;
+    QString method;
+    QString url;
+    QString reasonPhrase;
 };
 
 inline QJsonObject sessionProfileToJson(const SessionProfile& profile) {
