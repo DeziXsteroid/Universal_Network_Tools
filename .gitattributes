@@ -1,0 +1,18 @@
+*.md linguist-documentation=true
+docs/** linguist-documentation=true
+
+cpp/src/** linguist-language=C++
+cpp/CMakeLists.txt linguist-language=CMake
+
+cpp/resources/** linguist-generated=true
+*.png binary linguist-generated=true
+*.icns binary linguist-generated=true
+*.ico binary linguist-generated=true
+*.qrc linguist-detectable=false
+*.rc linguist-detectable=false
+
+*.sh linguist-generated=true
+*.bat linguist-generated=true
+*.ps1 linguist-generated=true
+*.applescript linguist-generated=true
+*.iss linguist-generated=true
