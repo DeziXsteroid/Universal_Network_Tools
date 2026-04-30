@@ -322,6 +322,19 @@ QString formatPingDisplay(const QString& value) {
     return QStringLiteral("%1 ms").arg(qMax(1, qRound(pingMs)));
 }
 
+QString detectTypeHint(const QStringList& openPorts, bool pingSuccess, bool onLink) {
+    if (!openPorts.isEmpty()) {
+        return QStringLiteral("tcp");
+    }
+    if (pingSuccess) {
+        return QStringLiteral("icmp");
+    }
+    if (onLink) {
+        return QStringLiteral("udp");
+    }
+    return QStringLiteral("-");
+}
+
 } // namespace
 
 NetworkScanService::NetworkScanService(VendorDbService* vendorDb, QObject* parent)
@@ -554,7 +567,7 @@ ScanRecord NetworkScanService::probeHost(const QString& ip, const AdapterInfo& a
     row.vendor = m_vendorDb != nullptr ? m_vendorDb->lookupVendor(row.mac) : QStringLiteral("unknown vendor");
     row.name = routeDisplayForHost(adapter, row);
     row.webDetect = detectWebService(ip, openPorts);
-    row.typeHint = QStringLiteral("Хост");
+    row.typeHint = detectTypeHint(openPorts, ping.success, row.onLink);
     row.speed = ping.success ? QStringLiteral("icmp") : QStringLiteral("link");
     return row;
 }

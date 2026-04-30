@@ -53,6 +53,7 @@
 #include <QMenuBar>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QPushButton>
 #include <QRadialGradient>
 #include <QRegularExpression>
@@ -77,6 +78,336 @@
 namespace {
 
 constexpr auto kWindowTitle = "Сканер IP - Network Tools";
+
+QString uiText(const QString& language, const char* ru, const char* en) {
+    return QString::fromUtf8(language == QStringLiteral("en") ? en : ru);
+}
+
+QString uiText(const nt::SettingsService* settings, const char* ru, const char* en) {
+    return uiText(settings != nullptr ? settings->language() : QStringLiteral("ru"), ru, en);
+}
+
+bool isEnglishUi(const nt::SettingsService* settings) {
+    return settings != nullptr && settings->language() == QStringLiteral("en");
+}
+
+QString localizedWindowTitle(const nt::SettingsService* settings) {
+    return uiText(settings, "Сканер IP - Network Tools", "IP Scanner - Network Tools");
+}
+
+QString localizedConnectText(const nt::SettingsService* settings, bool connected) {
+    return uiText(settings, connected ? "Отключить" : "Подключить", connected ? "Disconnect" : "Connect");
+}
+
+QString localizedUdpToggleText(const nt::SettingsService* settings, bool open) {
+    return uiText(settings, open ? "Закрыть" : "Открыть", open ? "Close" : "Open");
+}
+
+QString normalizedParityKey(const QString& value) {
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == QStringLiteral("even") || normalized == QStringLiteral("чет") || normalized == QStringLiteral("чёт")) {
+        return QStringLiteral("even");
+    }
+    if (normalized == QStringLiteral("odd") || normalized == QStringLiteral("нечет") || normalized == QStringLiteral("нечёт")) {
+        return QStringLiteral("odd");
+    }
+    return QStringLiteral("none");
+}
+
+QString normalizedFlowControlKey(const QString& value) {
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == QStringLiteral("hardware") || normalized == QStringLiteral("rts/cts")) {
+        return QStringLiteral("hardware");
+    }
+    if (normalized == QStringLiteral("software") || normalized == QStringLiteral("xon/xoff")) {
+        return QStringLiteral("software");
+    }
+    return QStringLiteral("none");
+}
+
+QString normalizedEolKey(const QString& value) {
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == QStringLiteral("cr")) {
+        return QStringLiteral("cr");
+    }
+    if (normalized == QStringLiteral("lf")) {
+        return QStringLiteral("lf");
+    }
+    if (normalized == QStringLiteral("crlf")) {
+        return QStringLiteral("crlf");
+    }
+    return QStringLiteral("none");
+}
+
+void setComboByData(QComboBox* combo, const QString& key) {
+    if (combo == nullptr) {
+        return;
+    }
+    int index = combo->findData(key);
+    if (index < 0) {
+        index = combo->findText(key);
+    }
+    combo->setCurrentIndex(index >= 0 ? index : 0);
+}
+
+QString comboValue(const QComboBox* combo) {
+    if (combo == nullptr) {
+        return {};
+    }
+    const QVariant data = combo->currentData();
+    return data.isValid() ? data.toString() : combo->currentText();
+}
+
+QString localizedRequestStatusDivider() {
+    return QStringLiteral("-------------------------- Status -------------------------");
+}
+
+QString localizedRequestBodyDivider() {
+    return QStringLiteral("--------------------------- Body --------------------------");
+}
+
+QString localizedRequestEndDivider() {
+    return QStringLiteral("--------------------------- End ---------------------------");
+}
+
+QString comparisonBadgeText() {
+    return QStringLiteral("new!");
+}
+
+QString localizedFoundDevicesText(const nt::SettingsService* settings, int count) {
+    return isEnglishUi(settings)
+        ? QStringLiteral("Devices: %1").arg(count)
+        : QStringLiteral("Устройств: %1").arg(count);
+}
+
+QString localizedScanIdleText(const nt::SettingsService* settings) {
+    return isEnglishUi(settings)
+        ? QStringLiteral("Scan idle")
+        : QStringLiteral("Ожидание сканирования");
+}
+
+QString localizedScanFinishedText(const nt::SettingsService* settings, int durationMs) {
+    return isEnglishUi(settings)
+        ? QStringLiteral("Scan finished in %1 s").arg(durationMs / 1000.0, 0, 'f', 2)
+        : QStringLiteral("Сканирование завершено за %1 c").arg(durationMs / 1000.0, 0, 'f', 2);
+}
+
+QString localizedScanSummaryText(const nt::SettingsService* settings, int activeCount, int onlineCount, int macCount) {
+    return isEnglishUi(settings)
+        ? QStringLiteral("Active: %1 | Online: %2 | MAC: %3").arg(activeCount).arg(onlineCount).arg(macCount)
+        : QStringLiteral("Активных: %1 | Онлайн: %2 | MAC: %3").arg(activeCount).arg(onlineCount).arg(macCount);
+}
+
+QString localizedComparisonModeText(const nt::SettingsService* settings) {
+    return isEnglishUi(settings)
+        ? QStringLiteral("Comparison mode enabled! Scan again now.")
+        : QStringLiteral("Режим сравнения включен! Теперь отсканируйте еще раз.");
+}
+
+QString scanPortCellText(const nt::SettingsService* settings, const QString& portText) {
+    const QString value = portText.trimmed();
+    if (value.isEmpty() || value == QStringLiteral("-") || value == QStringLiteral("[n/a]")) {
+        return isEnglishUi(settings) ? QStringLiteral("not open") : QStringLiteral("отсутствует");
+    }
+    return value;
+}
+
+QString normalizedTypeText(const QString& typeHint) {
+    const QString value = typeHint.trimmed();
+    if (value.isEmpty() || value == QStringLiteral("[n/a]")) {
+        return QStringLiteral("-");
+    }
+    return value;
+}
+
+QString scanTypeCellText(const QString& typeHint, bool isNewHost) {
+    const QString baseText = normalizedTypeText(typeHint);
+    if (!isNewHost) {
+        return baseText;
+    }
+    return baseText == QStringLiteral("-")
+        ? comparisonBadgeText()
+        : QStringLiteral("%1 %2").arg(comparisonBadgeText(), baseText);
+}
+
+struct SnmpParsedLine {
+    QString oid;
+    QString rawType;
+    QString value;
+    bool valid {false};
+};
+
+SnmpParsedLine parseSnmpLine(const QString& line) {
+    const QString trimmed = line.trimmed();
+    if (trimmed.isEmpty()
+        || trimmed.startsWith(QStringLiteral("Timeout"), Qt::CaseInsensitive)
+        || trimmed.startsWith(QStringLiteral("No Such"), Qt::CaseInsensitive)
+        || trimmed.startsWith(QStringLiteral("No more variables"), Qt::CaseInsensitive)) {
+        return {};
+    }
+
+    const QRegularExpression typedPattern(QStringLiteral(R"(^(.+?)\s*=\s*([A-Za-z0-9\-]+)\s*:\s*(.*)$)"));
+    const auto typedMatch = typedPattern.match(trimmed);
+    if (typedMatch.hasMatch()) {
+        return {
+            typedMatch.captured(1).trimmed(),
+            typedMatch.captured(2).trimmed(),
+            typedMatch.captured(3).trimmed(),
+            true,
+        };
+    }
+
+    const QRegularExpression plainPattern(QStringLiteral(R"(^(.+?)\s*=\s*(.*)$)"));
+    const auto plainMatch = plainPattern.match(trimmed);
+    if (plainMatch.hasMatch()) {
+        return {
+            plainMatch.captured(1).trimmed(),
+            QStringLiteral("string"),
+            plainMatch.captured(2).trimmed(),
+            true,
+        };
+    }
+    return {};
+}
+
+QString snmpValueDisplayText(const QString& rawType, const QString& value) {
+    QString text = value.trimmed();
+    const QString normalizedType = rawType.trimmed().toLower();
+    if ((normalizedType == QStringLiteral("string") || normalizedType == QStringLiteral("octetstr"))
+        && text.size() >= 2
+        && text.startsWith(QLatin1Char('"'))
+        && text.endsWith(QLatin1Char('"'))) {
+        text = text.mid(1, text.size() - 2);
+    }
+    return text;
+}
+
+QString snmpTypeDisplayText(const QString& rawType) {
+    const QString normalized = rawType.trimmed().toLower();
+    return normalized.isEmpty() ? QStringLiteral("-") : normalized;
+}
+
+QString snmpSetTypeToken(const QString& rawType) {
+    const QString normalized = rawType.trimmed().toLower();
+    if (normalized == QStringLiteral("integer") || normalized == QStringLiteral("integer32")) {
+        return QStringLiteral("i");
+    }
+    if (normalized == QStringLiteral("string") || normalized == QStringLiteral("octetstr")) {
+        return QStringLiteral("s");
+    }
+    if (normalized == QStringLiteral("oid")) {
+        return QStringLiteral("o");
+    }
+    if (normalized == QStringLiteral("ipaddress")) {
+        return QStringLiteral("a");
+    }
+    if (normalized == QStringLiteral("gauge32")
+        || normalized == QStringLiteral("counter32")
+        || normalized == QStringLiteral("unsigned32")) {
+        return QStringLiteral("u");
+    }
+    if (normalized == QStringLiteral("timeticks")) {
+        return QStringLiteral("t");
+    }
+    if (normalized == QStringLiteral("hex-string")) {
+        return QStringLiteral("x");
+    }
+    return {};
+}
+
+QString describeOidRu(const QString& oid) {
+    const QString value = oid.trimmed().toLower();
+    if (value.contains(QStringLiteral("sysdescr")) || value.endsWith(QStringLiteral(".1.0"))) return QStringLiteral("Описание устройства");
+    if (value.contains(QStringLiteral("sysobjectid")) || value.endsWith(QStringLiteral(".2.0"))) return QStringLiteral("Идентификатор модели");
+    if (value.contains(QStringLiteral("sysuptime")) || value.endsWith(QStringLiteral(".3.0"))) return QStringLiteral("Время работы");
+    if (value.contains(QStringLiteral("syscontact")) || value.endsWith(QStringLiteral(".4.0"))) return QStringLiteral("Контакт");
+    if (value.contains(QStringLiteral("sysname")) || value.endsWith(QStringLiteral(".5.0"))) return QStringLiteral("Имя устройства");
+    if (value.contains(QStringLiteral("syslocation")) || value.endsWith(QStringLiteral(".6.0"))) return QStringLiteral("Расположение");
+    if (value.contains(QStringLiteral("sysservices")) || value.endsWith(QStringLiteral(".7.0"))) return QStringLiteral("Сервисы");
+    if (value.contains(QStringLiteral("ifdescr"))) return QStringLiteral("Имя интерфейса");
+    if (value.contains(QStringLiteral("ifalias"))) return QStringLiteral("Псевдоним интерфейса");
+    if (value.contains(QStringLiteral("ifname"))) return QStringLiteral("Системное имя интерфейса");
+    if (value.contains(QStringLiteral("ifadminstatus"))) return QStringLiteral("Административный статус");
+    if (value.contains(QStringLiteral("ifoperstatus"))) return QStringLiteral("Рабочий статус");
+    if (value.contains(QStringLiteral("ifphysaddress"))) return QStringLiteral("MAC интерфейса");
+    if (value.contains(QStringLiteral("ifspeed"))) return QStringLiteral("Скорость интерфейса");
+    if (value.contains(QStringLiteral("ifinoctets"))) return QStringLiteral("Входящий трафик");
+    if (value.contains(QStringLiteral("ifoutoctets"))) return QStringLiteral("Исходящий трафик");
+    if (value.contains(QStringLiteral("hrsystemuptime"))) return QStringLiteral("Время работы хоста");
+    if (value.contains(QStringLiteral("hrmemorysize"))) return QStringLiteral("Объем памяти");
+    return QStringLiteral("Параметр устройства");
+}
+
+bool openPingInTerminal(const QString& ip) {
+    if (ip.trimmed().isEmpty()) {
+        return false;
+    }
+#ifdef Q_OS_MACOS
+    return QProcess::startDetached(
+        QStringLiteral("/usr/bin/osascript"),
+        {
+            QStringLiteral("-e"),
+            QStringLiteral("tell application \"Terminal\" to activate"),
+            QStringLiteral("-e"),
+            QStringLiteral("tell application \"Terminal\" to do script \"ping %1\"").arg(ip),
+        }
+    );
+#elif defined(Q_OS_WIN)
+    return QProcess::startDetached(
+        QStringLiteral("cmd.exe"),
+        {QStringLiteral("/k"), QStringLiteral("ping %1").arg(ip)}
+    );
+#else
+    return QProcess::startDetached(
+        QStringLiteral("x-terminal-emulator"),
+        {QStringLiteral("-e"), QStringLiteral("sh"), QStringLiteral("-lc"), QStringLiteral("ping %1; exec sh").arg(ip)}
+    );
+#endif
+}
+
+QString localizedRuntimeStatus(const nt::SettingsService* settings, const QString& text) {
+    if (!isEnglishUi(settings)) {
+        return text;
+    }
+
+    if (text == QStringLiteral("Отключено")) {
+        return QStringLiteral("Disconnected");
+    }
+    if (text == QStringLiteral("Закрыто")) {
+        return QStringLiteral("Closed");
+    }
+    if (text == QStringLiteral("Доступ отклонен")) {
+        return QStringLiteral("Access denied");
+    }
+    if (text == QStringLiteral("Подключение SSH...")) {
+        return QStringLiteral("Connecting SSH...");
+    }
+    if (text == QStringLiteral("SSH завершился")) {
+        return QStringLiteral("SSH exited");
+    }
+    if (text == QStringLiteral("SSH-клиент не найден. Установите OpenSSH, sshpass или plink.")) {
+        return QStringLiteral("SSH client not found. Install OpenSSH, sshpass, or plink.");
+    }
+    if (text == QStringLiteral("Serial не подключен")) {
+        return QStringLiteral("Serial is not connected");
+    }
+    if (text == QStringLiteral("TCP не подключен")) {
+        return QStringLiteral("TCP is not connected");
+    }
+    if (text == QStringLiteral("Telnet не подключен")) {
+        return QStringLiteral("Telnet is not connected");
+    }
+    if (text == QStringLiteral("SSH не подключен")) {
+        return QStringLiteral("SSH is not connected");
+    }
+    if (text.startsWith(QStringLiteral("UDP открыт :"))) {
+        return QStringLiteral("UDP open :%1").arg(text.section(QLatin1Char(':'), 1));
+    }
+    if (text.startsWith(QStringLiteral("Подключено "))) {
+        return QStringLiteral("Connected %1").arg(text.mid(QStringLiteral("Подключено ").size()));
+    }
+    return text;
+}
 
 QFont fixedFont(double pointSize = 10.5) {
     QFont font;
@@ -292,7 +623,8 @@ public:
         : QDialog(parent)
         , m_settings(settings)
         , m_vendorDb(vendorDb) {
-        setWindowTitle(QStringLiteral("Настройки"));
+        const QString language = settings != nullptr ? settings->language() : QStringLiteral("ru");
+        setWindowTitle(uiText(language, "Настройки", "Settings"));
         setModal(true);
         resize(560, 280);
 
@@ -302,23 +634,23 @@ public:
         m_workersSpin = new QSpinBox(this);
         m_workersSpin->setRange(8, 96);
         m_workersSpin->setValue(settings->scanWorkers());
-        form->addRow(QStringLiteral("Потоки сканирования"), m_workersSpin);
+        form->addRow(uiText(language, "Потоки сканирования", "Scan workers"), m_workersSpin);
 
-        m_scanOnStartupCheck = new QCheckBox(QStringLiteral("Включить"), this);
+        m_scanOnStartupCheck = new QCheckBox(uiText(language, "Включить", "Enable"), this);
         m_scanOnStartupCheck->setChecked(settings->value(QStringLiteral("scan_on_startup"), true).toBool(true));
-        form->addRow(QStringLiteral("Автоскан при запуске"), m_scanOnStartupCheck);
+        form->addRow(uiText(language, "Автоскан при запуске", "Scan on startup"), m_scanOnStartupCheck);
 
         m_themeCombo = new QComboBox(this);
-        m_themeCombo->addItem(QStringLiteral("Темная"), QStringLiteral("dark"));
-        m_themeCombo->addItem(QStringLiteral("Светлая"), QStringLiteral("light"));
+        m_themeCombo->addItem(uiText(language, "Темная", "Dark"), QStringLiteral("dark"));
+        m_themeCombo->addItem(uiText(language, "Светлая", "Light"), QStringLiteral("light"));
         m_themeCombo->setCurrentIndex(qMax(0, m_themeCombo->findData(settings->theme())));
-        form->addRow(QStringLiteral("Тема"), m_themeCombo);
+        form->addRow(uiText(language, "Тема", "Theme"), m_themeCombo);
 
         m_languageCombo = new QComboBox(this);
-        m_languageCombo->addItem(QStringLiteral("Русский"), QStringLiteral("ru"));
+        m_languageCombo->addItem(uiText(language, "Русский", "Russian"), QStringLiteral("ru"));
         m_languageCombo->addItem(QStringLiteral("English"), QStringLiteral("en"));
         m_languageCombo->setCurrentIndex(qMax(0, m_languageCombo->findData(settings->language())));
-        form->addRow(QStringLiteral("Язык"), m_languageCombo);
+        form->addRow(uiText(language, "Язык", "Language"), m_languageCombo);
 
         m_terminalColorCombo = new QComboBox(this);
         m_terminalColorCombo->addItem(QStringLiteral("Mint"), QStringLiteral("mint"));
@@ -327,17 +659,17 @@ public:
         m_terminalColorCombo->addItem(QStringLiteral("Cyan"), QStringLiteral("cyan"));
         m_terminalColorCombo->addItem(QStringLiteral("White"), QStringLiteral("white"));
         m_terminalColorCombo->setCurrentIndex(qMax(0, m_terminalColorCombo->findData(settings->value(QStringLiteral("terminal_text_color"), QStringLiteral("mint")).toString(QStringLiteral("mint")))));
-        form->addRow(QStringLiteral("SSH / Telnet цвет"), m_terminalColorCombo);
+        form->addRow(uiText(language, "SSH / Telnet цвет", "SSH / Telnet color"), m_terminalColorCombo);
 
         m_vendorStatus = new QLabel(vendorDb->statusText(), this);
         m_vendorStatus->setWordWrap(true);
         m_vendorStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        form->addRow(QStringLiteral("База вендоров"), m_vendorStatus);
+        form->addRow(uiText(language, "База вендоров", "Vendor database"), m_vendorStatus);
 
         auto* pathLabel = new QLabel(vendorDb->dbPath(), this);
         pathLabel->setWordWrap(true);
         pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        form->addRow(QStringLiteral("Путь к базе"), pathLabel);
+        form->addRow(uiText(language, "Путь к базе", "Database path"), pathLabel);
 
         root->addLayout(form);
 
@@ -399,11 +731,11 @@ MainWindow::MainWindow(QWidget* parent)
     applyStyleSheet();
     buildUi();
 
-    setWindowTitle(QString::fromUtf8(kWindowTitle));
+    setWindowTitle(localizedWindowTitle(m_settings));
     resize(m_settings->initialWindowSize());
     setMinimumSize(860, 455);
     statusBar()->hide();
-    updateScanFooter(QStringLiteral("Готово"));
+    updateScanFooter(localizedScanIdleText(m_settings));
 
     connect(m_scanAutoScanTimer, &QTimer::timeout, this, [this]() {
         if (m_scanAutoScanCheck != nullptr && m_scanAutoScanCheck->isChecked() && !m_scanner->isRunning()) {
@@ -422,29 +754,29 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(m_scanner, &nt::NetworkScanService::scanStarted, this, [this]() {
         if (m_scanStartButton != nullptr) {
-            m_scanStartButton->setText(QStringLiteral("■ Стоп"));
+            m_scanStartButton->setText(uiText(m_settings, "■ Стоп", "■ Stop"));
             m_scanStartButton->setEnabled(true);
         }
         if (m_scanStopButton != nullptr) {
             m_scanStopButton->setEnabled(true);
         }
-        updateScanFooter(QStringLiteral("Сканирование..."));
+        updateScanFooter(uiText(m_settings, "Сканирование...", "Scanning..."));
     });
     connect(m_scanner, &nt::NetworkScanService::recordReady, this, &MainWindow::appendScanRecord);
     connect(m_scanner, &nt::NetworkScanService::scanFinished, this, &MainWindow::finalizeScan);
     connect(m_scanner, &nt::NetworkScanService::scanFailed, this, [this](const QString& errorText) {
-        QMessageBox::warning(this, QStringLiteral("Сканер IP"), errorText);
+        QMessageBox::warning(this, uiText(m_settings, "Сканер IP", "IP Scanner"), localizedRuntimeStatus(m_settings, errorText));
         if (m_scanStartButton != nullptr) {
             m_scanStartButton->setEnabled(true);
-            m_scanStartButton->setText(QStringLiteral("▶ Старт"));
+            m_scanStartButton->setText(uiText(m_settings, "▶ Старт", "▶ Start"));
         }
         if (m_scanStopButton != nullptr) {
             m_scanStopButton->setEnabled(false);
         }
         if (m_scanFooterThreadsLabel != nullptr) {
-            m_scanFooterThreadsLabel->setText(QStringLiteral("Потоки: 0"));
+            m_scanFooterThreadsLabel->setText(localizedFoundDevicesText(m_settings, m_scanRows.size()));
         }
-        updateScanFooter(QStringLiteral("Готово"));
+        updateScanFooter(localizedScanIdleText(m_settings));
     });
 
     connect(m_http, &nt::HttpRequestService::finished, this, [this](const nt::HttpResponse& response) {
@@ -463,14 +795,30 @@ MainWindow::MainWindow(QWidget* parent)
         textFormat.setFont(fixedFont());
         textFormat.setForeground(isLightTheme() ? QColor("#1f2730") : QColor("#eef2f6"));
 
+        auto setHttpBlockAlignment = [&cursor](Qt::Alignment alignment) {
+            QTextBlockFormat blockFormat = cursor.blockFormat();
+            blockFormat.setAlignment(alignment);
+            cursor.setBlockFormat(blockFormat);
+        };
+
         const QString statusText = response.errorText.isEmpty()
             ? QStringLiteral("HTTP %1 %2").arg(response.statusCode).arg(response.reasonPhrase.trimmed())
             : QStringLiteral("ERROR %1").arg(response.errorText);
-        cursor.insertText(statusText.trimmed() + QStringLiteral("\n"), statusFormat);
+        setHttpBlockAlignment(Qt::AlignHCenter);
+        cursor.insertText(localizedRequestStatusDivider(), textFormat);
+        cursor.insertBlock();
+        setHttpBlockAlignment(Qt::AlignLeft);
+        cursor.insertText(statusText.trimmed(), statusFormat);
+        cursor.insertBlock();
+        cursor.insertBlock();
+        setHttpBlockAlignment(Qt::AlignHCenter);
+        cursor.insertText(localizedRequestBodyDivider(), textFormat);
+        cursor.insertBlock();
+        setHttpBlockAlignment(Qt::AlignLeft);
 
         QString text;
         if (!response.errorText.isEmpty()) {
-            text = response.errorText;
+            text = localizedRuntimeStatus(m_settings, response.errorText);
         } else {
             const auto parsed = QJsonDocument::fromJson(response.body);
             if (!parsed.isNull()) {
@@ -480,9 +828,15 @@ MainWindow::MainWindow(QWidget* parent)
             }
         }
         if (text.trimmed().isEmpty()) {
-            text = QStringLiteral("(empty response)");
+            text = uiText(m_settings, "(пустой ответ)", "(empty response)");
         }
-        cursor.insertText(text + QStringLiteral("\n\n"), textFormat);
+        cursor.insertText(text, textFormat);
+        cursor.insertBlock();
+        setHttpBlockAlignment(Qt::AlignHCenter);
+        cursor.insertText(localizedRequestEndDivider(), textFormat);
+        cursor.insertBlock();
+        cursor.insertBlock();
+        setHttpBlockAlignment(Qt::AlignLeft);
         m_requestResponseEdit->setTextCursor(cursor);
         m_requestResponseEdit->ensureCursorVisible();
     });
@@ -500,7 +854,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_serialSession, &nt::SerialSession::connectedChanged, this, [this](bool connected) {
         if (m_serialWidgets.connectButton != nullptr) {
-            m_serialWidgets.connectButton->setText(connected ? QStringLiteral("Отключить") : QStringLiteral("Подключить"));
+            m_serialWidgets.connectButton->setText(localizedConnectText(m_settings, connected));
         }
     });
 
@@ -517,7 +871,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_tcpSession, &nt::TcpClientSession::connectedChanged, this, [this](bool connected) {
         if (m_tcpWidgets.connectButton != nullptr) {
-            m_tcpWidgets.connectButton->setText(connected ? QStringLiteral("Отключить") : QStringLiteral("Подключить"));
+            m_tcpWidgets.connectButton->setText(localizedConnectText(m_settings, connected));
         }
     });
 
@@ -535,7 +889,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_udpSession, &nt::UdpSocketSession::connectedChanged, this, [this](bool open) {
         if (m_udpWidgets.connectButton != nullptr) {
-            m_udpWidgets.connectButton->setText(open ? QStringLiteral("Закрыть") : QStringLiteral("Открыть"));
+            m_udpWidgets.connectButton->setText(localizedUdpToggleText(m_settings, open));
         }
     });
 
@@ -544,12 +898,12 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_sshSession, &nt::SshProcessSession::stateChanged, this, [this](const QString& text) {
         if (m_sshWidgets.statusLabel != nullptr) {
-            m_sshWidgets.statusLabel->setText(text);
+            m_sshWidgets.statusLabel->setText(localizedRuntimeStatus(m_settings, text));
         }
     });
     connect(m_sshSession, &nt::SshProcessSession::connectedChanged, this, [this](bool connected) {
         if (m_sshWidgets.connectButton != nullptr) {
-            m_sshWidgets.connectButton->setText(connected ? QStringLiteral("Отключить") : QStringLiteral("Подключить"));
+            m_sshWidgets.connectButton->setText(localizedConnectText(m_settings, connected));
         }
     });
 
@@ -558,12 +912,12 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_telnetSession, &nt::TelnetSession::stateChanged, this, [this](const QString& text) {
         if (m_telnetWidgets.statusLabel != nullptr) {
-            m_telnetWidgets.statusLabel->setText(text);
+            m_telnetWidgets.statusLabel->setText(localizedRuntimeStatus(m_settings, text));
         }
     });
     connect(m_telnetSession, &nt::TelnetSession::connectedChanged, this, [this](bool connected) {
         if (m_telnetWidgets.connectButton != nullptr) {
-            m_telnetWidgets.connectButton->setText(connected ? QStringLiteral("Отключить") : QStringLiteral("Подключить"));
+            m_telnetWidgets.connectButton->setText(localizedConnectText(m_settings, connected));
         }
     });
 }
@@ -800,7 +1154,7 @@ void MainWindow::applyStyleSheet() {
             max-width:190px;
             min-height:26px;
             max-height:26px;
-            border-radius:8px;
+            border-radius:0px;
             font-weight:600;
         }
         QLineEdit, QComboBox, QSpinBox { min-height:20px; max-height:20px; padding:1px 5px; font-size:11px; }
@@ -868,7 +1222,7 @@ void MainWindow::applyStyleSheet() {
             max-width:190px;
             min-height:26px;
             max-height:26px;
-            border-radius:8px;
+            border-radius:0px;
             font-weight:600;
         }
         QLineEdit, QComboBox, QSpinBox {
@@ -1035,18 +1389,19 @@ void MainWindow::refreshScanTableColors() {
 }
 
 QWidget* MainWindow::createHeader() {
+    const QString language = m_settings->language();
     auto* frame = new QFrame(this);
     frame->setObjectName(QStringLiteral("appHeader"));
     auto* layout = new QHBoxLayout(frame);
     layout->setContentsMargins(10, 8, 10, 8);
     layout->setSpacing(8);
 
-    auto* title = new QLabel(QString::fromUtf8(kWindowTitle), frame);
+    auto* title = new QLabel(localizedWindowTitle(m_settings), frame);
     title->setObjectName(QStringLiteral("titleLabel"));
     layout->addWidget(title);
     layout->addStretch(1);
 
-    auto* settingsButton = new QPushButton(QStringLiteral("Настройки"), frame);
+    auto* settingsButton = new QPushButton(uiText(language, "Настройки", "Settings"), frame);
     settingsButton->setMinimumWidth(96);
     connect(settingsButton, &QPushButton::clicked, this, &MainWindow::openSettingsDialog);
     layout->addWidget(settingsButton);
@@ -1054,6 +1409,7 @@ QWidget* MainWindow::createHeader() {
 }
 
 QWidget* MainWindow::createSidebar() {
+    const QString language = m_settings->language();
     auto* frame = new QFrame(this);
     frame->setObjectName(QStringLiteral("navPanel"));
     frame->setMinimumWidth(180);
@@ -1063,13 +1419,13 @@ QWidget* MainWindow::createSidebar() {
     layout->setContentsMargins(10, 10, 10, 10);
     layout->setSpacing(8);
 
-    auto* title = new QLabel(QStringLiteral("Разделы"), frame);
+    auto* title = new QLabel(uiText(language, "Разделы", "Sections"), frame);
     title->setObjectName(QStringLiteral("sectionLabel"));
     layout->addWidget(title);
 
     m_navList = new QListWidget(frame);
     m_navList->addItems({
-        QStringLiteral("Сканер IP"),
+        uiText(language, "Сканер IP", "IP Scanner"),
         QStringLiteral("HTTP / REQ"),
         QStringLiteral("Serial"),
         QStringLiteral("TCP"),
@@ -1083,6 +1439,7 @@ QWidget* MainWindow::createSidebar() {
 }
 
 QWidget* MainWindow::createScanPage() {
+    const QString language = m_settings->language();
     auto* page = new QWidget(this);
     auto* root = new QVBoxLayout(page);
     root->setContentsMargins(3, 3, 3, 3);
@@ -1096,15 +1453,15 @@ QWidget* MainWindow::createScanPage() {
 
     auto* rangeRow = new QHBoxLayout();
     rangeRow->setSpacing(5);
-    rangeRow->addWidget(new QLabel(QStringLiteral("Диапазон IP:"), toolbar));
+    rangeRow->addWidget(new QLabel(uiText(language, "Диапазон IP:", "IP range:"), toolbar));
     m_scanStartIp = new QLineEdit(toolbar);
     m_scanStartIp->setFixedWidth(132);
     rangeRow->addWidget(m_scanStartIp);
-    rangeRow->addWidget(new QLabel(QStringLiteral("до"), toolbar));
+    rangeRow->addWidget(new QLabel(uiText(language, "до", "to"), toolbar));
     m_scanEndIp = new QLineEdit(toolbar);
     m_scanEndIp->setFixedWidth(132);
     rangeRow->addWidget(m_scanEndIp);
-    rangeRow->addWidget(new QLabel(QStringLiteral("Адаптер:"), toolbar));
+    rangeRow->addWidget(new QLabel(uiText(language, "Адаптер:", "Adapter:"), toolbar));
     m_scanAdapterCombo = new QComboBox(toolbar);
     m_scanAdapterCombo->setFixedWidth(180);
     rangeRow->addWidget(m_scanAdapterCombo);
@@ -1113,28 +1470,28 @@ QWidget* MainWindow::createScanPage() {
 
     auto* optionsRow = new QHBoxLayout();
     optionsRow->setSpacing(5);
-    optionsRow->addWidget(new QLabel(QStringLiteral("Авто IP:"), toolbar));
-    m_scanAutoIpCheck = new QCheckBox(QStringLiteral("вкл"), toolbar);
+    optionsRow->addWidget(new QLabel(uiText(language, "Авто IP:", "Auto IP:"), toolbar));
+    m_scanAutoIpCheck = new QCheckBox(uiText(language, "вкл", "on"), toolbar);
     m_scanAutoIpCheck->setChecked(true);
     optionsRow->addWidget(m_scanAutoIpCheck);
-    m_scanAutoScanCheck = new QCheckBox(QStringLiteral("авто скан"), toolbar);
+    m_scanAutoScanCheck = new QCheckBox(uiText(language, "авто скан", "auto scan"), toolbar);
     m_scanAutoScanCheck->setChecked(m_settings->value(QStringLiteral("auto_scan_enabled"), false).toBool(false));
     optionsRow->addWidget(m_scanAutoScanCheck);
     optionsRow->addSpacing(12);
-    optionsRow->addWidget(new QLabel(QStringLiteral("Маска:"), toolbar));
+    optionsRow->addWidget(new QLabel(uiText(language, "Маска:", "Mask:"), toolbar));
     m_scanPrefixCombo = new QComboBox(toolbar);
     m_scanPrefixCombo->addItems({QStringLiteral("/24"), QStringLiteral("/23"), QStringLiteral("/22"), QStringLiteral("/16"), QStringLiteral("/32")});
     m_scanPrefixCombo->setCurrentText(QStringLiteral("/24"));
     m_scanPrefixCombo->setFixedWidth(70);
     optionsRow->addWidget(m_scanPrefixCombo);
-    m_scanStartButton = new QPushButton(QStringLiteral("▶ Старт"), toolbar);
+    m_scanStartButton = new QPushButton(uiText(language, "▶ Старт", "▶ Start"), toolbar);
     m_scanStartButton->setObjectName(QStringLiteral("scanStartButton"));
     m_scanStartButton->setFixedWidth(132);
     optionsRow->addWidget(m_scanStartButton);
     optionsRow->addStretch(1);
     toolbarLayout->addLayout(optionsRow);
 
-    m_scanOnlineLabel = new QLabel(QStringLiteral("Онлайн: 0"), toolbar);
+    m_scanOnlineLabel = new QLabel(uiText(language, "Онлайн: 0", "Online: 0"), toolbar);
     m_scanOnlineLabel->hide();
     m_scanStopButton = new QPushButton(page);
     m_scanStopButton->hide();
@@ -1163,9 +1520,9 @@ QWidget* MainWindow::createScanPage() {
     connect(m_scanAutoIpCheck, &QCheckBox::toggled, this, [this](bool checked) {
         if (checked) {
             applyRangeFromCurrentAdapter();
-            updateScanFooter(QStringLiteral("Авто IP включен"));
+            updateScanFooter(uiText(m_settings, "Авто IP включен", "Auto IP enabled"));
         } else {
-            updateScanFooter(QStringLiteral("Авто IP выключен"));
+            updateScanFooter(uiText(m_settings, "Авто IP выключен", "Auto IP disabled"));
         }
     });
     connect(m_scanAutoScanCheck, &QCheckBox::toggled, this, [this](bool checked) {
@@ -1173,13 +1530,13 @@ QWidget* MainWindow::createScanPage() {
         m_settings->save();
         if (checked) {
             m_scanAutoScanTimer->start();
-            updateScanFooter(QStringLiteral("Авто скан включен"));
+            updateScanFooter(uiText(m_settings, "Авто скан включен", "Auto scan enabled"));
             if (!m_scanner->isRunning()) {
                 startScan();
             }
         } else {
             m_scanAutoScanTimer->stop();
-            updateScanFooter(QStringLiteral("Авто скан выключен"));
+            updateScanFooter(uiText(m_settings, "Авто скан выключен", "Auto scan disabled"));
         }
     });
 
@@ -1190,19 +1547,24 @@ QWidget* MainWindow::createScanPage() {
     auto* tableLayout = new QVBoxLayout(tableFrame);
     tableLayout->setContentsMargins(0, 0, 0, 0);
 
-    m_scanTable = new QTableWidget(0, 6, tableFrame);
+    m_scanTable = new QTableWidget(0, 7, tableFrame);
     m_scanTable->setHorizontalHeaderLabels({
         QStringLiteral("IP"),
-        QStringLiteral("Пинг"),
+        uiText(language, "Пинг", "Ping"),
         QStringLiteral("MAC"),
-        QStringLiteral("Вендор"),
-        QStringLiteral("Шлюз IP"),
-        QStringLiteral("Откр. порт"),
+        uiText(language, "Вендор", "Vendor"),
+        uiText(language, "Шлюз IP", "Gateway IP"),
+        uiText(language, "Откр. порт", "Open port"),
+        uiText(language, "Тип", "Type"),
     });
     m_scanTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_scanTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_scanTable->setAlternatingRowColors(false);
     m_scanTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_scanTable->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_scanTable->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_scanTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_scanTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_scanTable->verticalHeader()->setVisible(false);
     m_scanTable->verticalHeader()->setDefaultSectionSize(23);
     m_scanTable->horizontalHeader()->setFixedHeight(23);
@@ -1210,12 +1572,16 @@ QWidget* MainWindow::createScanPage() {
     m_scanTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
     m_scanTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Fixed);
     m_scanTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Fixed);
+    m_scanTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Fixed);
     m_scanTable->setShowGrid(true);
     m_scanTable->setColumnWidth(0, 165);
     m_scanTable->setColumnWidth(1, 72);
     m_scanTable->setColumnWidth(2, 128);
     m_scanTable->setColumnWidth(4, 132);
     m_scanTable->setColumnWidth(5, 110);
+    m_scanTable->setColumnWidth(6, 84);
+    connect(m_scanTable, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateSelectedHostPanel);
+    connect(m_scanTable, &QTableWidget::customContextMenuRequested, this, &MainWindow::openScanContextMenu);
     tableLayout->addWidget(m_scanTable, 1);
     root->addWidget(tableFrame, 1);
 
@@ -1224,8 +1590,8 @@ QWidget* MainWindow::createScanPage() {
     auto* footerLayout = new QHBoxLayout(footer);
     footerLayout->setContentsMargins(0, 0, 0, 0);
     footerLayout->setSpacing(1);
-    m_scanFooterStateLabel = new QLabel(QStringLiteral("Готово"), footer);
-    m_scanFooterThreadsLabel = new QLabel(QStringLiteral("Потоки: 0"), footer);
+    m_scanFooterStateLabel = new QLabel(localizedScanIdleText(m_settings), footer);
+    m_scanFooterThreadsLabel = new QLabel(localizedFoundDevicesText(m_settings, 0), footer);
     m_scanFooterStateLabel->setObjectName(QStringLiteral("statusCell"));
     m_scanFooterThreadsLabel->setObjectName(QStringLiteral("statusCell"));
     m_scanFooterStateLabel->setMinimumWidth(320);
@@ -1243,6 +1609,7 @@ QWidget* MainWindow::createScanPage() {
 }
 
 QWidget* MainWindow::createRequestPage() {
+    const QString language = m_settings->language();
     auto* page = new QWidget(this);
     auto* root = new QHBoxLayout(page);
     root->setContentsMargins(8, 8, 8, 8);
@@ -1255,7 +1622,7 @@ QWidget* MainWindow::createRequestPage() {
     m_requestResponseEdit->setLineWrapMode(QTextEdit::NoWrap);
     root->addWidget(m_requestResponseEdit, 3);
 
-    auto* controls = new QGroupBox(QStringLiteral("Запрос"), page);
+    auto* controls = new QGroupBox(uiText(language, "Запрос", "Request"), page);
     auto* controlsLayout = new QVBoxLayout(controls);
 
     auto* form = new QGridLayout();
@@ -1269,15 +1636,15 @@ QWidget* MainWindow::createRequestPage() {
     m_requestTimeoutSpin->setRange(1, 120);
     m_requestTimeoutSpin->setValue(10);
 
-    form->addWidget(new QLabel(QStringLiteral("Метод"), controls), 0, 0);
+    form->addWidget(new QLabel(uiText(language, "Метод", "Method"), controls), 0, 0);
     form->addWidget(m_requestMethodCombo, 0, 1);
     form->addWidget(new QLabel(QStringLiteral("URL"), controls), 1, 0);
     form->addWidget(m_requestUrlEdit, 1, 1);
-    form->addWidget(new QLabel(QStringLiteral("Логин"), controls), 2, 0);
+    form->addWidget(new QLabel(uiText(language, "Логин", "Login"), controls), 2, 0);
     form->addWidget(m_requestUserEdit, 2, 1);
-    form->addWidget(new QLabel(QStringLiteral("Пароль"), controls), 3, 0);
+    form->addWidget(new QLabel(uiText(language, "Пароль", "Password"), controls), 3, 0);
     form->addWidget(m_requestPassEdit, 3, 1);
-    form->addWidget(new QLabel(QStringLiteral("Таймаут"), controls), 4, 0);
+    form->addWidget(new QLabel(uiText(language, "Таймаут", "Timeout"), controls), 4, 0);
     form->addWidget(m_requestTimeoutSpin, 4, 1);
     controlsLayout->addLayout(form);
 
@@ -1291,16 +1658,16 @@ QWidget* MainWindow::createRequestPage() {
     m_requestHeadersEdit = headersEditor;
     m_requestParamsEdit = paramsEditor;
     m_requestBodyEdit = bodyEditor;
-    tabs->addTab(m_requestHeadersEdit, QStringLiteral("Заголовки"));
-    tabs->addTab(m_requestParamsEdit, QStringLiteral("Параметры"));
-    tabs->addTab(m_requestBodyEdit, QStringLiteral("Тело"));
+    tabs->addTab(m_requestHeadersEdit, uiText(language, "Заголовки", "Headers"));
+    tabs->addTab(m_requestParamsEdit, uiText(language, "Параметры", "Params"));
+    tabs->addTab(m_requestBodyEdit, uiText(language, "Тело", "Body"));
     auto* historyPlaceholder = new QWidget(tabs);
     tabs->addTab(historyPlaceholder, QStringLiteral("History"));
     tabs->setProperty("lastRealRequestTab", 0);
     controlsLayout->addWidget(tabs, 1);
 
     auto* actions = new QHBoxLayout();
-    auto* sendButton = new QPushButton(QStringLiteral("Отправить запрос"), controls);
+    auto* sendButton = new QPushButton(uiText(language, "Отправить запрос", "Send Req"), controls);
     sendButton->setObjectName(QStringLiteral("httpSendButton"));
     actions->addStretch(1);
     actions->addWidget(sendButton);
@@ -1326,6 +1693,7 @@ QWidget* MainWindow::createRequestPage() {
 }
 
 QWidget* MainWindow::createSerialPage() {
+    const QString language = m_settings->language();
     auto* page = new QWidget(this);
     auto* root = new QVBoxLayout(page);
     root->setContentsMargins(6, 6, 6, 6);
@@ -1345,30 +1713,37 @@ QWidget* MainWindow::createSerialPage() {
     m_serialWidgets.bitsCombo = new QComboBox(top);
     m_serialWidgets.bitsCombo->addItems({QStringLiteral("8"), QStringLiteral("7")});
     m_serialWidgets.parityCombo = new QComboBox(top);
-    m_serialWidgets.parityCombo->addItems({QStringLiteral("Нет"), QStringLiteral("Чет"), QStringLiteral("Нечет")});
+    m_serialWidgets.parityCombo->addItem(uiText(language, "Нет", "None"), QStringLiteral("none"));
+    m_serialWidgets.parityCombo->addItem(uiText(language, "Чет", "Even"), QStringLiteral("even"));
+    m_serialWidgets.parityCombo->addItem(uiText(language, "Нечет", "Odd"), QStringLiteral("odd"));
     m_serialWidgets.stopBitsCombo = new QComboBox(top);
     m_serialWidgets.stopBitsCombo->addItems({QStringLiteral("1"), QStringLiteral("1.5"), QStringLiteral("2")});
     m_serialWidgets.flowControlCombo = new QComboBox(top);
-    m_serialWidgets.flowControlCombo->addItems({QStringLiteral("Нет"), QStringLiteral("RTS/CTS"), QStringLiteral("XON/XOFF")});
+    m_serialWidgets.flowControlCombo->addItem(uiText(language, "Нет", "None"), QStringLiteral("none"));
+    m_serialWidgets.flowControlCombo->addItem(QStringLiteral("RTS/CTS"), QStringLiteral("hardware"));
+    m_serialWidgets.flowControlCombo->addItem(QStringLiteral("XON/XOFF"), QStringLiteral("software"));
     m_serialWidgets.hexCheck = new QCheckBox(QStringLiteral("HEX"), top);
     m_serialWidgets.eolCombo = new QComboBox(top);
-    m_serialWidgets.eolCombo->addItems({QStringLiteral("Нет"), QStringLiteral("CR"), QStringLiteral("LF"), QStringLiteral("CRLF")});
-    m_serialWidgets.connectButton = new QPushButton(QStringLiteral("Подключить"), top);
-    auto* refreshButton = new QPushButton(QStringLiteral("Обновить"), top);
+    m_serialWidgets.eolCombo->addItem(uiText(language, "Нет", "None"), QStringLiteral("none"));
+    m_serialWidgets.eolCombo->addItem(QStringLiteral("CR"), QStringLiteral("cr"));
+    m_serialWidgets.eolCombo->addItem(QStringLiteral("LF"), QStringLiteral("lf"));
+    m_serialWidgets.eolCombo->addItem(QStringLiteral("CRLF"), QStringLiteral("crlf"));
+    m_serialWidgets.connectButton = new QPushButton(uiText(language, "Подключить", "Connect"), top);
+    auto* refreshButton = new QPushButton(uiText(language, "Обновить", "Refresh"), top);
 
-    topLayout->addWidget(new QLabel(QStringLiteral("Порт"), top), 0, 0);
+    topLayout->addWidget(new QLabel(uiText(language, "Порт", "Port"), top), 0, 0);
     topLayout->addWidget(m_serialWidgets.portCombo, 0, 1);
-    topLayout->addWidget(new QLabel(QStringLiteral("Скорость"), top), 0, 2);
+    topLayout->addWidget(new QLabel(uiText(language, "Скорость", "Baud"), top), 0, 2);
     topLayout->addWidget(m_serialWidgets.baudCombo, 0, 3);
-    topLayout->addWidget(new QLabel(QStringLiteral("Биты"), top), 0, 4);
+    topLayout->addWidget(new QLabel(uiText(language, "Биты", "Bits"), top), 0, 4);
     topLayout->addWidget(m_serialWidgets.bitsCombo, 0, 5);
-    topLayout->addWidget(new QLabel(QStringLiteral("Четность"), top), 0, 6);
+    topLayout->addWidget(new QLabel(uiText(language, "Четность", "Parity"), top), 0, 6);
     topLayout->addWidget(m_serialWidgets.parityCombo, 0, 7);
-    topLayout->addWidget(new QLabel(QStringLiteral("Стоп-биты"), top), 1, 0);
+    topLayout->addWidget(new QLabel(uiText(language, "Стоп-биты", "Stop bits"), top), 1, 0);
     topLayout->addWidget(m_serialWidgets.stopBitsCombo, 1, 1);
     topLayout->addWidget(new QLabel(QStringLiteral("Flow"), top), 1, 2);
     topLayout->addWidget(m_serialWidgets.flowControlCombo, 1, 3);
-    topLayout->addWidget(new QLabel(QStringLiteral("Окончание"), top), 1, 4);
+    topLayout->addWidget(new QLabel(uiText(language, "Окончание", "Line ending"), top), 1, 4);
     topLayout->addWidget(m_serialWidgets.eolCombo, 1, 5);
     topLayout->addWidget(m_serialWidgets.hexCheck, 1, 6);
     topLayout->addWidget(refreshButton, 1, 7);
@@ -1388,14 +1763,14 @@ QWidget* MainWindow::createSerialPage() {
     sendLayout->setHorizontalSpacing(6);
     sendLayout->setVerticalSpacing(6);
     m_serialWidgets.inputEdit = new QLineEdit(sendBox);
-    m_serialWidgets.inputEdit->setPlaceholderText(QStringLiteral("Данные"));
-    auto* sendButton = new QPushButton(QStringLiteral("Отправить"), sendBox);
-    sendLayout->addWidget(new QLabel(QStringLiteral("Ввод"), sendBox), 0, 0);
+    m_serialWidgets.inputEdit->setPlaceholderText(uiText(language, "Данные", "Payload"));
+    auto* sendButton = new QPushButton(uiText(language, "Отправить", "Send"), sendBox);
+    sendLayout->addWidget(new QLabel(uiText(language, "Ввод", "Input"), sendBox), 0, 0);
     sendLayout->addWidget(m_serialWidgets.inputEdit, 0, 1);
     sendLayout->addWidget(sendButton, 0, 2);
     for (int i = 0; i < 3; ++i) {
         auto* quickEdit = new QLineEdit(sendBox);
-        quickEdit->setPlaceholderText(QStringLiteral("Команда %1").arg(i + 1));
+        quickEdit->setPlaceholderText(uiText(language, "Команда %1", "Command %1").arg(i + 1));
         auto* quickButton = new QPushButton(QStringLiteral("▶ %1").arg(i + 1), sendBox);
         m_serialWidgets.quickEdits.append(quickEdit);
         sendLayout->addWidget(new QLabel(QStringLiteral("Cmd %1").arg(i + 1), sendBox), i + 1, 0);
@@ -1418,16 +1793,17 @@ QWidget* MainWindow::createSerialPage() {
         const auto section = m_settings->section(QStringLiteral("serial"));
         m_serialWidgets.baudCombo->setCurrentText(section.value(QStringLiteral("baud")).toString(QStringLiteral("9600")));
         m_serialWidgets.bitsCombo->setCurrentText(section.value(QStringLiteral("data_bits")).toString(QStringLiteral("8")));
-        m_serialWidgets.parityCombo->setCurrentText(section.value(QStringLiteral("parity")).toString(QStringLiteral("Нет")));
+        setComboByData(m_serialWidgets.parityCombo, normalizedParityKey(section.value(QStringLiteral("parity")).toString(QStringLiteral("none"))));
         m_serialWidgets.stopBitsCombo->setCurrentText(section.value(QStringLiteral("stop_bits")).toString(QStringLiteral("1")));
-        m_serialWidgets.flowControlCombo->setCurrentText(section.value(QStringLiteral("flow_control")).toString(QStringLiteral("Нет")));
-        m_serialWidgets.eolCombo->setCurrentText(section.value(QStringLiteral("eol")).toString(QStringLiteral("Нет")));
+        setComboByData(m_serialWidgets.flowControlCombo, normalizedFlowControlKey(section.value(QStringLiteral("flow_control")).toString(QStringLiteral("none"))));
+        setComboByData(m_serialWidgets.eolCombo, normalizedEolKey(section.value(QStringLiteral("eol")).toString(QStringLiteral("none"))));
     }
     loadQuickCommands(QStringLiteral("serial"), m_serialWidgets);
     return page;
 }
 
 QWidget* MainWindow::createTcpPage() {
+    const QString language = m_settings->language();
     auto* page = new QWidget(this);
     auto* root = new QVBoxLayout(page);
     root->setContentsMargins(6, 6, 6, 6);
@@ -1452,21 +1828,24 @@ QWidget* MainWindow::createTcpPage() {
     m_tcpWidgets.localPortSpin->setFixedWidth(88);
     m_tcpWidgets.hexCheck = new QCheckBox(QStringLiteral("HEX"), top);
     m_tcpWidgets.eolCombo = new QComboBox(top);
-    m_tcpWidgets.eolCombo->addItems({QStringLiteral("Нет"), QStringLiteral("CR"), QStringLiteral("LF"), QStringLiteral("CRLF")});
+    m_tcpWidgets.eolCombo->addItem(uiText(language, "Нет", "None"), QStringLiteral("none"));
+    m_tcpWidgets.eolCombo->addItem(QStringLiteral("CR"), QStringLiteral("cr"));
+    m_tcpWidgets.eolCombo->addItem(QStringLiteral("LF"), QStringLiteral("lf"));
+    m_tcpWidgets.eolCombo->addItem(QStringLiteral("CRLF"), QStringLiteral("crlf"));
     m_tcpWidgets.noDelayCheck = new QCheckBox(QStringLiteral("NoDelay"), top);
     m_tcpWidgets.noDelayCheck->setChecked(true);
     m_tcpWidgets.keepAliveCheck = new QCheckBox(QStringLiteral("KeepAlive"), top);
-    m_tcpWidgets.connectButton = new QPushButton(QStringLiteral("Подключить"), top);
+    m_tcpWidgets.connectButton = new QPushButton(uiText(language, "Подключить", "Connect"), top);
 
-    topLayout->addWidget(new QLabel(QStringLiteral("Хост"), top), 0, 0);
+    topLayout->addWidget(new QLabel(uiText(language, "Хост", "Host"), top), 0, 0);
     topLayout->addWidget(m_tcpWidgets.hostEdit, 0, 1);
-    topLayout->addWidget(new QLabel(QStringLiteral("Удаленный порт"), top), 0, 2);
+    topLayout->addWidget(new QLabel(uiText(language, "Удаленный порт", "Remote port"), top), 0, 2);
     topLayout->addWidget(m_tcpWidgets.portSpin, 0, 3);
-    topLayout->addWidget(new QLabel(QStringLiteral("Локальный порт"), top), 0, 4);
+    topLayout->addWidget(new QLabel(uiText(language, "Локальный порт", "Local port"), top), 0, 4);
     topLayout->addWidget(m_tcpWidgets.localPortSpin, 0, 5);
     topLayout->addWidget(m_tcpWidgets.noDelayCheck, 1, 0);
     topLayout->addWidget(m_tcpWidgets.keepAliveCheck, 1, 1);
-    topLayout->addWidget(new QLabel(QStringLiteral("Окончание"), top), 1, 2);
+    topLayout->addWidget(new QLabel(uiText(language, "Окончание", "Line ending"), top), 1, 2);
     topLayout->addWidget(m_tcpWidgets.eolCombo, 1, 3);
     topLayout->addWidget(m_tcpWidgets.hexCheck, 1, 4);
     topLayout->addWidget(m_tcpWidgets.connectButton, 1, 5);
@@ -1487,14 +1866,14 @@ QWidget* MainWindow::createTcpPage() {
     sendLayout->setHorizontalSpacing(6);
     sendLayout->setVerticalSpacing(6);
     m_tcpWidgets.inputEdit = new QLineEdit(sendBox);
-    m_tcpWidgets.inputEdit->setPlaceholderText(QStringLiteral("Данные"));
-    auto* sendButton = new QPushButton(QStringLiteral("Отправить"), sendBox);
-    sendLayout->addWidget(new QLabel(QStringLiteral("Ввод"), sendBox), 0, 0);
+    m_tcpWidgets.inputEdit->setPlaceholderText(uiText(language, "Данные", "Payload"));
+    auto* sendButton = new QPushButton(uiText(language, "Отправить", "Send"), sendBox);
+    sendLayout->addWidget(new QLabel(uiText(language, "Ввод", "Input"), sendBox), 0, 0);
     sendLayout->addWidget(m_tcpWidgets.inputEdit, 0, 1);
     sendLayout->addWidget(sendButton, 0, 2);
     for (int i = 0; i < 3; ++i) {
         auto* quickEdit = new QLineEdit(sendBox);
-        quickEdit->setPlaceholderText(QStringLiteral("Команда %1").arg(i + 1));
+        quickEdit->setPlaceholderText(uiText(language, "Команда %1", "Command %1").arg(i + 1));
         auto* quickButton = new QPushButton(QStringLiteral("▶ %1").arg(i + 1), sendBox);
         m_tcpWidgets.quickEdits.append(quickEdit);
         sendLayout->addWidget(new QLabel(QStringLiteral("Cmd %1").arg(i + 1), sendBox), i + 1, 0);
@@ -1517,13 +1896,14 @@ QWidget* MainWindow::createTcpPage() {
         m_tcpWidgets.localPortSpin->setValue(section.value(QStringLiteral("local_port")).toInt(0));
         m_tcpWidgets.noDelayCheck->setChecked(section.value(QStringLiteral("no_delay")).toBool(true));
         m_tcpWidgets.keepAliveCheck->setChecked(section.value(QStringLiteral("keep_alive")).toBool(false));
-        m_tcpWidgets.eolCombo->setCurrentText(section.value(QStringLiteral("eol")).toString(QStringLiteral("Нет")));
+        setComboByData(m_tcpWidgets.eolCombo, normalizedEolKey(section.value(QStringLiteral("eol")).toString(QStringLiteral("none"))));
     }
     loadQuickCommands(QStringLiteral("tcp"), m_tcpWidgets);
     return page;
 }
 
 QWidget* MainWindow::createUdpPage() {
+    const QString language = m_settings->language();
     auto* page = new QWidget(this);
     auto* root = new QVBoxLayout(page);
     root->setContentsMargins(6, 6, 6, 6);
@@ -1548,19 +1928,22 @@ QWidget* MainWindow::createUdpPage() {
     m_udpWidgets.localPortSpin->setFixedWidth(88);
     m_udpWidgets.hexCheck = new QCheckBox(QStringLiteral("HEX"), top);
     m_udpWidgets.eolCombo = new QComboBox(top);
-    m_udpWidgets.eolCombo->addItems({QStringLiteral("Нет"), QStringLiteral("CR"), QStringLiteral("LF"), QStringLiteral("CRLF")});
+    m_udpWidgets.eolCombo->addItem(uiText(language, "Нет", "None"), QStringLiteral("none"));
+    m_udpWidgets.eolCombo->addItem(QStringLiteral("CR"), QStringLiteral("cr"));
+    m_udpWidgets.eolCombo->addItem(QStringLiteral("LF"), QStringLiteral("lf"));
+    m_udpWidgets.eolCombo->addItem(QStringLiteral("CRLF"), QStringLiteral("crlf"));
     m_udpWidgets.reuseAddressCheck = new QCheckBox(QStringLiteral("Reuse"), top);
     m_udpWidgets.reuseAddressCheck->setChecked(true);
-    m_udpWidgets.connectButton = new QPushButton(QStringLiteral("Открыть"), top);
+    m_udpWidgets.connectButton = new QPushButton(uiText(language, "Открыть", "Open"), top);
 
-    topLayout->addWidget(new QLabel(QStringLiteral("Удаленный хост"), top), 0, 0);
+    topLayout->addWidget(new QLabel(uiText(language, "Удаленный хост", "Remote host"), top), 0, 0);
     topLayout->addWidget(m_udpWidgets.hostEdit, 0, 1);
-    topLayout->addWidget(new QLabel(QStringLiteral("Удаленный порт"), top), 0, 2);
+    topLayout->addWidget(new QLabel(uiText(language, "Удаленный порт", "Remote port"), top), 0, 2);
     topLayout->addWidget(m_udpWidgets.remotePortSpin, 0, 3);
-    topLayout->addWidget(new QLabel(QStringLiteral("Локальный порт"), top), 0, 4);
+    topLayout->addWidget(new QLabel(uiText(language, "Локальный порт", "Local port"), top), 0, 4);
     topLayout->addWidget(m_udpWidgets.localPortSpin, 0, 5);
     topLayout->addWidget(m_udpWidgets.reuseAddressCheck, 1, 0);
-    topLayout->addWidget(new QLabel(QStringLiteral("Окончание"), top), 1, 1);
+    topLayout->addWidget(new QLabel(uiText(language, "Окончание", "Line ending"), top), 1, 1);
     topLayout->addWidget(m_udpWidgets.eolCombo, 1, 2);
     topLayout->addWidget(m_udpWidgets.hexCheck, 1, 3);
     topLayout->addWidget(m_udpWidgets.connectButton, 1, 5);
@@ -1581,14 +1964,14 @@ QWidget* MainWindow::createUdpPage() {
     sendLayout->setHorizontalSpacing(6);
     sendLayout->setVerticalSpacing(6);
     m_udpWidgets.inputEdit = new QLineEdit(sendBox);
-    m_udpWidgets.inputEdit->setPlaceholderText(QStringLiteral("Данные"));
-    auto* sendButton = new QPushButton(QStringLiteral("Отправить"), sendBox);
-    sendLayout->addWidget(new QLabel(QStringLiteral("Ввод"), sendBox), 0, 0);
+    m_udpWidgets.inputEdit->setPlaceholderText(uiText(language, "Данные", "Payload"));
+    auto* sendButton = new QPushButton(uiText(language, "Отправить", "Send"), sendBox);
+    sendLayout->addWidget(new QLabel(uiText(language, "Ввод", "Input"), sendBox), 0, 0);
     sendLayout->addWidget(m_udpWidgets.inputEdit, 0, 1);
     sendLayout->addWidget(sendButton, 0, 2);
     for (int i = 0; i < 3; ++i) {
         auto* quickEdit = new QLineEdit(sendBox);
-        quickEdit->setPlaceholderText(QStringLiteral("Команда %1").arg(i + 1));
+        quickEdit->setPlaceholderText(uiText(language, "Команда %1", "Command %1").arg(i + 1));
         auto* quickButton = new QPushButton(QStringLiteral("▶ %1").arg(i + 1), sendBox);
         m_udpWidgets.quickEdits.append(quickEdit);
         sendLayout->addWidget(new QLabel(QStringLiteral("Cmd %1").arg(i + 1), sendBox), i + 1, 0);
@@ -1610,13 +1993,14 @@ QWidget* MainWindow::createUdpPage() {
         m_udpWidgets.remotePortSpin->setValue(section.value(QStringLiteral("remote_port")).toInt(52381));
         m_udpWidgets.localPortSpin->setValue(section.value(QStringLiteral("local_port")).toInt(0));
         m_udpWidgets.reuseAddressCheck->setChecked(section.value(QStringLiteral("reuse_address")).toBool(true));
-        m_udpWidgets.eolCombo->setCurrentText(section.value(QStringLiteral("eol")).toString(QStringLiteral("Нет")));
+        setComboByData(m_udpWidgets.eolCombo, normalizedEolKey(section.value(QStringLiteral("eol")).toString(QStringLiteral("none"))));
     }
     loadQuickCommands(QStringLiteral("udp"), m_udpWidgets);
     return page;
 }
 
 QWidget* MainWindow::createSessionPage(const QString& kind, SessionWidgets& widgets, quint16 defaultPort) {
+    const QString language = m_settings->language();
     auto* page = new QWidget(this);
     auto* root = new QVBoxLayout(page);
     root->setContentsMargins(6, 6, 6, 6);
@@ -1631,13 +2015,13 @@ QWidget* MainWindow::createSessionPage(const QString& kind, SessionWidgets& widg
     auto* leftLayout = new QVBoxLayout(left);
     leftLayout->setContentsMargins(8, 8, 8, 8);
 
-    auto* profilesBox = new QGroupBox(kind + QStringLiteral(" профили"), left);
+    auto* profilesBox = new QGroupBox(kind + uiText(language, " профили", " profiles"), left);
     auto* profilesLayout = new QVBoxLayout(profilesBox);
     widgets.profiles = new QListWidget(profilesBox);
     profilesLayout->addWidget(widgets.profiles, 1);
     auto* profileButtons = new QHBoxLayout();
-    auto* newButton = new QPushButton(QStringLiteral("Новый"), profilesBox);
-    auto* deleteButton = new QPushButton(QStringLiteral("Удалить"), profilesBox);
+    auto* newButton = new QPushButton(uiText(language, "Новый", "New"), profilesBox);
+    auto* deleteButton = new QPushButton(uiText(language, "Удалить", "Delete"), profilesBox);
     profileButtons->addWidget(newButton);
     profileButtons->addWidget(deleteButton);
     profilesLayout->addLayout(profileButtons);
@@ -1648,34 +2032,52 @@ QWidget* MainWindow::createSessionPage(const QString& kind, SessionWidgets& widg
     auto* rightLayout = new QVBoxLayout(right);
     rightLayout->setContentsMargins(8, 8, 8, 8);
 
-    auto* workspaceBox = new QGroupBox(kind + QStringLiteral(" рабочая область"), right);
+    auto* workspaceBox = new QGroupBox(kind + uiText(language, " рабочая область", " workspace"), right);
     auto* grid = new QGridLayout(workspaceBox);
+    grid->setHorizontalSpacing(6);
+    grid->setVerticalSpacing(6);
+    grid->setColumnStretch(1, 1);
+    grid->setColumnStretch(3, 1);
     widgets.nameEdit = new QLineEdit(workspaceBox);
     widgets.hostEdit = new QLineEdit(workspaceBox);
     widgets.portSpin = new QSpinBox(workspaceBox);
     widgets.portSpin->setRange(1, 65535);
     widgets.portSpin->setValue(defaultPort);
+    widgets.portSpin->setFixedWidth(92);
     widgets.userEdit = new QLineEdit(workspaceBox);
     widgets.passEdit = new QLineEdit(workspaceBox);
     widgets.passEdit->setEchoMode(QLineEdit::Password);
-    widgets.connectButton = new QPushButton(QStringLiteral("Подключить"), workspaceBox);
-    widgets.saveButton = new QPushButton(QStringLiteral("Сохранить профиль"), workspaceBox);
+    widgets.connectButton = new QPushButton(uiText(language, "Подключить", "Connect"), workspaceBox);
+    widgets.saveButton = new QPushButton(uiText(language, "Сохранить профиль", "Save profile"), workspaceBox);
 
-    grid->addWidget(new QLabel(QStringLiteral("Имя"), workspaceBox), 0, 0);
+    auto* portRow = new QWidget(workspaceBox);
+    auto* portLayout = new QHBoxLayout(portRow);
+    portLayout->setContentsMargins(0, 0, 0, 0);
+    portLayout->setSpacing(6);
+    portLayout->addWidget(new QLabel(uiText(language, "Порт", "Port"), portRow));
+    portLayout->addWidget(widgets.portSpin);
+    portLayout->addStretch(1);
+
+    auto* actionsRow = new QWidget(workspaceBox);
+    auto* actionsLayout = new QHBoxLayout(actionsRow);
+    actionsLayout->setContentsMargins(0, 0, 0, 0);
+    actionsLayout->setSpacing(6);
+    actionsLayout->addWidget(widgets.saveButton);
+    actionsLayout->addWidget(widgets.connectButton);
+
+    grid->addWidget(new QLabel(uiText(language, "Имя", "Name"), workspaceBox), 0, 0);
     grid->addWidget(widgets.nameEdit, 0, 1);
-    grid->addWidget(new QLabel(QStringLiteral("Хост"), workspaceBox), 0, 2);
+    grid->addWidget(new QLabel(uiText(language, "Хост", "Host"), workspaceBox), 0, 2);
     grid->addWidget(widgets.hostEdit, 0, 3);
-    grid->addWidget(new QLabel(QStringLiteral("Порт"), workspaceBox), 0, 4);
-    grid->addWidget(widgets.portSpin, 0, 5);
-    grid->addWidget(new QLabel(QStringLiteral("Логин"), workspaceBox), 1, 0);
+    grid->addWidget(portRow, 0, 4, 1, 2);
+    grid->addWidget(new QLabel(uiText(language, "Логин", "Login"), workspaceBox), 1, 0);
     grid->addWidget(widgets.userEdit, 1, 1);
-    grid->addWidget(new QLabel(QStringLiteral("Пароль"), workspaceBox), 1, 2);
+    grid->addWidget(new QLabel(uiText(language, "Пароль", "Password"), workspaceBox), 1, 2);
     grid->addWidget(widgets.passEdit, 1, 3);
-    grid->addWidget(widgets.saveButton, 1, 4);
-    grid->addWidget(widgets.connectButton, 1, 5);
+    grid->addWidget(actionsRow, 1, 4, 1, 2);
     rightLayout->addWidget(workspaceBox);
 
-    widgets.statusLabel = new QLabel(QStringLiteral("Отключено"), right);
+    widgets.statusLabel = new QLabel(uiText(language, "Не подключено", "Not connected"), right);
     widgets.statusLabel->setObjectName(QStringLiteral("statusHint"));
     rightLayout->addWidget(widgets.statusLabel);
 
@@ -1711,6 +2113,164 @@ QWidget* MainWindow::createSessionPage(const QString& kind, SessionWidgets& widg
     return page;
 }
 
+QWidget* MainWindow::createSnmpPage() {
+    const QString language = m_settings->language();
+    auto* page = new QWidget(this);
+    auto* root = new QVBoxLayout(page);
+    root->setContentsMargins(6, 6, 6, 6);
+
+    auto* splitter = new QSplitter(Qt::Horizontal, page);
+    splitter->setHandleWidth(1);
+    root->addWidget(splitter, 1);
+
+    auto* left = new QFrame(splitter);
+    left->setObjectName(QStringLiteral("sessionPane"));
+    left->setMinimumWidth(240);
+    auto* leftLayout = new QVBoxLayout(left);
+    leftLayout->setContentsMargins(8, 8, 8, 8);
+
+    auto* profilesBox = new QGroupBox(QStringLiteral("SNMP") + uiText(language, " профили", " profiles"), left);
+    auto* profilesLayout = new QVBoxLayout(profilesBox);
+    m_snmpWidgets.profiles = new QListWidget(profilesBox);
+    profilesLayout->addWidget(m_snmpWidgets.profiles, 1);
+    auto* profileButtons = new QHBoxLayout();
+    auto* newButton = new QPushButton(uiText(language, "Новый", "New"), profilesBox);
+    auto* deleteButton = new QPushButton(uiText(language, "Удалить", "Delete"), profilesBox);
+    profileButtons->addWidget(newButton);
+    profileButtons->addWidget(deleteButton);
+    profilesLayout->addLayout(profileButtons);
+    leftLayout->addWidget(profilesBox, 1);
+
+    auto* right = new QFrame(splitter);
+    right->setObjectName(QStringLiteral("sessionPane"));
+    auto* rightLayout = new QVBoxLayout(right);
+    rightLayout->setContentsMargins(8, 8, 8, 8);
+
+    auto* workspaceBox = new QGroupBox(QStringLiteral("SNMP") + uiText(language, " рабочая область", " workspace"), right);
+    auto* workspaceLayout = new QVBoxLayout(workspaceBox);
+    workspaceLayout->setContentsMargins(6, 6, 6, 6);
+    workspaceLayout->setSpacing(4);
+
+    m_snmpWidgets.nameEdit = new QLineEdit(workspaceBox);
+    m_snmpWidgets.hostEdit = new QLineEdit(workspaceBox);
+    m_snmpWidgets.nameEdit->setFixedWidth(150);
+    m_snmpWidgets.hostEdit->setFixedWidth(180);
+    m_snmpWidgets.nameEdit->setPlaceholderText(uiText(language, "Имя", "Name"));
+    m_snmpWidgets.hostEdit->setPlaceholderText(uiText(language, "Хост", "Host"));
+    m_snmpWidgets.portSpin = new QSpinBox(workspaceBox);
+    m_snmpWidgets.portSpin->setRange(1, 65535);
+    m_snmpWidgets.portSpin->setValue(161);
+    m_snmpWidgets.portSpin->setPrefix(uiText(language, "Порт ", "Port "));
+    m_snmpWidgets.portSpin->setFixedWidth(118);
+    m_snmpWidgets.versionCombo = new QComboBox(workspaceBox);
+    m_snmpWidgets.versionCombo->addItem(QStringLiteral("SNMP v1"), QStringLiteral("1"));
+    m_snmpWidgets.versionCombo->addItem(QStringLiteral("SNMP v2c"), QStringLiteral("2c"));
+    m_snmpWidgets.versionCombo->setFixedWidth(108);
+    m_snmpWidgets.versionCombo->setToolTip(uiText(language, "Версия SNMP", "SNMP version"));
+    m_snmpWidgets.communityEdit = new QLineEdit(workspaceBox);
+    m_snmpWidgets.writeCommunityEdit = new QLineEdit(workspaceBox);
+    m_snmpWidgets.communityEdit->setFixedWidth(150);
+    m_snmpWidgets.writeCommunityEdit->setFixedWidth(150);
+    m_snmpWidgets.communityEdit->setPlaceholderText(uiText(language, "Чтение community", "Read community"));
+    m_snmpWidgets.writeCommunityEdit->setPlaceholderText(uiText(language, "Запись community", "Write community"));
+    m_snmpWidgets.baseOidEdit = new QLineEdit(workspaceBox);
+    m_snmpWidgets.baseOidEdit->setFixedWidth(248);
+    m_snmpWidgets.baseOidEdit->setPlaceholderText(uiText(language, "Base OID", "Base OID"));
+    m_snmpWidgets.loadButton = new QPushButton(uiText(language, "Загрузить OID", "Load OIDs"), workspaceBox);
+    m_snmpWidgets.saveButton = new QPushButton(uiText(language, "Сохранить профиль", "Save profile"), workspaceBox);
+    m_snmpWidgets.saveButton->setMinimumWidth(132);
+    m_snmpWidgets.loadButton->setMinimumWidth(118);
+
+    auto* topRow = new QHBoxLayout();
+    topRow->setSpacing(6);
+    topRow->addWidget(m_snmpWidgets.nameEdit);
+    topRow->addWidget(m_snmpWidgets.hostEdit);
+    topRow->addWidget(m_snmpWidgets.portSpin);
+    topRow->addStretch(1);
+    workspaceLayout->addLayout(topRow);
+
+    auto* middleRow = new QHBoxLayout();
+    middleRow->setSpacing(6);
+    middleRow->addWidget(m_snmpWidgets.communityEdit);
+    middleRow->addWidget(m_snmpWidgets.writeCommunityEdit);
+    middleRow->addWidget(m_snmpWidgets.versionCombo);
+    middleRow->addStretch(1);
+    workspaceLayout->addLayout(middleRow);
+
+    auto* oidRow = new QHBoxLayout();
+    oidRow->setSpacing(6);
+    oidRow->addWidget(m_snmpWidgets.baseOidEdit);
+    oidRow->addWidget(m_snmpWidgets.saveButton);
+    oidRow->addWidget(m_snmpWidgets.loadButton);
+    oidRow->addStretch(1);
+    workspaceLayout->addLayout(oidRow);
+    rightLayout->addWidget(workspaceBox);
+
+    m_snmpWidgets.statusLabel = new QLabel(uiText(language, "OID еще не загружены", "OIDs are not loaded yet"), right);
+    m_snmpWidgets.statusLabel->setObjectName(QStringLiteral("statusHint"));
+    rightLayout->addWidget(m_snmpWidgets.statusLabel);
+
+    m_snmpWidgets.table = new QTableWidget(0, 4, right);
+    m_snmpWidgets.table->setHorizontalHeaderLabels({
+        QStringLiteral("OID"),
+        uiText(language, "Параметр", "Parameter"),
+        uiText(language, "Тип", "Type"),
+        uiText(language, "Значение", "Value"),
+    });
+    m_snmpWidgets.table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_snmpWidgets.table->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_snmpWidgets.table->setAlternatingRowColors(false);
+    m_snmpWidgets.table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed | QAbstractItemView::SelectedClicked);
+    m_snmpWidgets.table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_snmpWidgets.table->verticalHeader()->setVisible(false);
+    m_snmpWidgets.table->verticalHeader()->setDefaultSectionSize(24);
+    m_snmpWidgets.table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_snmpWidgets.table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_snmpWidgets.table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_snmpWidgets.table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    rightLayout->addWidget(m_snmpWidgets.table, 1);
+
+    splitter->addWidget(left);
+    splitter->addWidget(right);
+    splitter->setStretchFactor(0, 0);
+    splitter->setStretchFactor(1, 1);
+    splitter->setSizes({260, 980});
+
+    const auto snmpSection = m_settings->section(QStringLiteral("snmp"));
+    m_snmpWidgets.versionCombo->setCurrentIndex(qMax(0, m_snmpWidgets.versionCombo->findData(snmpSection.value(QStringLiteral("version")).toString(QStringLiteral("2c")))));
+    m_snmpWidgets.baseOidEdit->setText(snmpSection.value(QStringLiteral("base_oid")).toString(QStringLiteral(".1.3.6.1.2.1.1")));
+
+    connect(newButton, &QPushButton::clicked, this, &MainWindow::newSnmpProfile);
+    connect(deleteButton, &QPushButton::clicked, this, &MainWindow::deleteSnmpProfile);
+    connect(m_snmpWidgets.saveButton, &QPushButton::clicked, this, &MainWindow::saveSnmpProfile);
+    connect(m_snmpWidgets.loadButton, &QPushButton::clicked, this, &MainWindow::loadSnmpOidList);
+    connect(m_snmpWidgets.table, &QTableWidget::itemChanged, this, &MainWindow::handleSnmpValueEdited);
+    connect(m_snmpWidgets.profiles, &QListWidget::itemSelectionChanged, this, [this]() {
+        const auto* item = m_snmpWidgets.profiles->currentItem();
+        if (item == nullptr) {
+            return;
+        }
+        applySnmpProfile(item->data(Qt::UserRole).value<nt::SessionProfile>());
+    });
+    connect(m_snmpWidgets.baseOidEdit, &QLineEdit::editingFinished, this, [this]() {
+        auto section = m_settings->section(QStringLiteral("snmp"));
+        section.insert(QStringLiteral("base_oid"), m_snmpWidgets.baseOidEdit->text().trimmed());
+        section.insert(QStringLiteral("version"), comboValue(m_snmpWidgets.versionCombo));
+        m_settings->setSection(QStringLiteral("snmp"), section);
+        m_settings->save();
+    });
+    connect(m_snmpWidgets.versionCombo, &QComboBox::currentTextChanged, this, [this]() {
+        auto section = m_settings->section(QStringLiteral("snmp"));
+        section.insert(QStringLiteral("base_oid"), m_snmpWidgets.baseOidEdit->text().trimmed());
+        section.insert(QStringLiteral("version"), comboValue(m_snmpWidgets.versionCombo));
+        m_settings->setSection(QStringLiteral("snmp"), section);
+        m_settings->save();
+    });
+
+    loadSnmpProfiles();
+    return page;
+}
+
 QWidget* MainWindow::createPlaceholderPage(const QString& title, const QString& text) {
     auto* page = new QWidget(this);
     auto* root = new QVBoxLayout(page);
@@ -1732,13 +2292,14 @@ QWidget* MainWindow::createPlaceholderPage(const QString& title, const QString& 
 }
 
 void MainWindow::configureMenuBar() {
+    const QString language = m_settings->language();
     auto* mainMenu = menuBar();
     mainMenu->setNativeMenuBar(false);
     mainMenu->clear();
 
-    auto* goToMenu = mainMenu->addMenu(QStringLiteral("Функции"));
+    auto* goToMenu = mainMenu->addMenu(uiText(language, "Функции", "Tools"));
     const QList<QPair<QString, int>> pages {
-        {QStringLiteral("Сканер IP"), 0},
+        {uiText(language, "Сканер IP", "IP Scanner"), 0},
         {QStringLiteral("HTTP / REQ"), 1},
         {QStringLiteral("Serial"), 2},
         {QStringLiteral("TCP"), 3},
@@ -1750,22 +2311,23 @@ void MainWindow::configureMenuBar() {
         goToMenu->addAction(item.first, this, [this, index = item.second]() { syncCurrentPage(index); });
     }
 
-    auto* commandsMenu = mainMenu->addMenu(QStringLiteral("Обновление"));
-    commandsMenu->addAction(QStringLiteral("Автодиапазон"), this, &MainWindow::applySuggestedRange);
-    commandsMenu->addAction(QStringLiteral("Обновить диапазон"), this, &MainWindow::resolveHostnameRange);
-    commandsMenu->addAction(QStringLiteral("Обновить адаптеры"), this, &MainWindow::reloadAdapters);
+    auto* commandsMenu = mainMenu->addMenu(uiText(language, "Обновление", "Refresh"));
+    commandsMenu->addAction(uiText(language, "Автодиапазон", "Auto range"), this, &MainWindow::applySuggestedRange);
+    commandsMenu->addAction(uiText(language, "Обновить диапазон", "Refresh range"), this, &MainWindow::resolveHostnameRange);
+    commandsMenu->addAction(uiText(language, "Обновить адаптеры", "Refresh adapters"), this, &MainWindow::reloadAdapters);
 
-    m_favoritesMenu = mainMenu->addMenu(QStringLiteral("Избранное"));
+    m_favoritesMenu = mainMenu->addMenu(uiText(language, "Анализ сети", "Network Analysis"));
     refreshFavoritesMenu();
 
-    mainMenu->addAction(QStringLiteral("Настройки"), this, &MainWindow::openSettingsDialog);
+    mainMenu->addAction(uiText(language, "Настройки", "Settings"), this, &MainWindow::openSettingsDialog);
 
-    auto* helpMenu = mainMenu->addMenu(QStringLiteral("Справка"));
-    helpMenu->addAction(QStringLiteral("Руководство"), this, [this]() {
+    auto* helpMenu = mainMenu->addMenu(uiText(language, "Справка", "Help"));
+    helpMenu->addAction(uiText(language, "Руководство", "Guide"), this, [this]() {
         QMessageBox::information(
             this,
-            QStringLiteral("Руководство"),
-            QStringLiteral(
+            uiText(m_settings, "Руководство", "Guide"),
+            uiText(
+                m_settings,
                 "Network Tools\n\n"
                 "Назначение:\n"
                 "Промышленная настольная утилита для IP-сканирования, HTTP-запросов, Serial, TCP, UDP, SSH и Telnet.\n\n"
@@ -1774,14 +2336,23 @@ void MainWindow::configureMenuBar() {
                 "Безопасность и эксплуатация:\n"
                 "Используйте только доверенные сетевые сегменты и подтвержденные учетные данные. Перед запуском в продуктивной среде проверьте сетевые политики, адреса, порты и сценарии автосканирования.\n\n"
                 "Журналы обмена:\n"
-                "Зеленая стрелка обозначает исходящую команду, синяя стрелка — входящий ответ. При включенном HEX данные отображаются в шестнадцатеричном виде как для передачи, так и для приема."
+                "Зеленая стрелка обозначает исходящую команду, синяя стрелка — входящий ответ. При включенном HEX данные отображаются в шестнадцатеричном виде как для передачи, так и для приема.",
+                "Network Tools\n\n"
+                "Purpose:\n"
+                "A desktop utility for IP scanning, HTTP requests, Serial, TCP, UDP, SSH, and Telnet.\n\n"
+                "Transport modules:\n"
+                "Serial, TCP, and UDP support both text exchange and arbitrary binary / HEX payloads, including VISCA-level control commands and similar protocols.\n\n"
+                "Safety and operation:\n"
+                "Use only trusted network segments and verified credentials. Before running in production, verify network policies, addresses, ports, and auto-scan scenarios.\n\n"
+                "Traffic logs:\n"
+                "The green arrow marks outgoing commands, the blue arrow marks incoming responses. With HEX enabled, data is shown in hexadecimal form for both send and receive."
             )
         );
     });
-    helpMenu->addAction(QStringLiteral("О программе"), this, [this]() {
+    helpMenu->addAction(uiText(language, "О программе", "About"), this, [this]() {
         QMessageBox::information(
             this,
-            QStringLiteral("О программе"),
+            uiText(m_settings, "О программе", "About"),
             QStringLiteral("Network Tools\nNative C++/Qt desktop utility for network diagnostics and transport control.")
         );
     });
@@ -1848,8 +2419,8 @@ void MainWindow::openSettingsDialog() {
     if (previousLanguage != m_settings->language()) {
         QMessageBox::information(
             this,
-            QStringLiteral("Настройки"),
-            QStringLiteral("Язык интерфейса сохранен. Для полной локализации перезапустите приложение.")
+            uiText(m_settings, "Настройки", "Settings"),
+            uiText(m_settings, "Язык интерфейса сохранен. Перезапустите приложение.", "Interface language saved. Restart the application.")
         );
     }
     if (previousTerminalColor != m_settings->value(QStringLiteral("terminal_text_color"), QStringLiteral("mint")).toString(QStringLiteral("mint"))) {
@@ -1921,7 +2492,7 @@ void MainWindow::applyRangeFromCurrentAdapter() {
 
 void MainWindow::resolveHostnameRange() {
     applyRangeFromCurrentAdapter();
-    updateScanFooter(QStringLiteral("Диапазон обновлен по адаптеру"));
+    updateScanFooter(uiText(m_settings, "Диапазон обновлен по адаптеру", "Range refreshed from adapter"));
 }
 
 void MainWindow::startScan() {
@@ -1932,13 +2503,14 @@ void MainWindow::startScan() {
     }
     clearScanTable();
     m_scanRows.clear();
+    m_scanNewIps.clear();
     if (m_scanOnlineLabel != nullptr) {
-        m_scanOnlineLabel->setText(QStringLiteral("Онлайн: 0"));
+        m_scanOnlineLabel->setText(uiText(m_settings, "Онлайн: 0", "Online: 0"));
     }
     m_vendorDb->ensureReady(false);
-    updateScanFooter(QStringLiteral("Сканирование..."));
+    updateScanFooter(uiText(m_settings, "Сканирование...", "Scanning..."));
     if (m_scanFooterThreadsLabel != nullptr) {
-        m_scanFooterThreadsLabel->setText(QStringLiteral("Потоки: %1").arg(m_settings->scanWorkers()));
+        m_scanFooterThreadsLabel->setText(localizedFoundDevicesText(m_settings, 0));
     }
     m_scanner->start(
         m_scanStartIp->text().trimmed(),
@@ -1953,17 +2525,17 @@ void MainWindow::stopScan() {
     m_scanner->cancel();
     if (m_scanStartButton != nullptr) {
         m_scanStartButton->setEnabled(true);
-        m_scanStartButton->setText(QStringLiteral("▶ Старт"));
+        m_scanStartButton->setText(uiText(m_settings, "▶ Старт", "▶ Start"));
     }
     if (m_scanStopButton != nullptr) {
         m_scanStopButton->setEnabled(false);
     }
     if (m_scanFooterThreadsLabel != nullptr) {
-        m_scanFooterThreadsLabel->setText(QStringLiteral("Потоки: 0"));
+        m_scanFooterThreadsLabel->setText(localizedFoundDevicesText(m_settings, m_scanRows.size()));
     }
     updateScanFooter(m_scanAutoScanCheck != nullptr && m_scanAutoScanCheck->isChecked()
-        ? QStringLiteral("Остановка сканирования... Авто скан активен")
-        : QStringLiteral("Остановка сканирования..."));
+        ? uiText(m_settings, "Остановка сканирования... Авто скан активен", "Stopping scan... Auto scan is enabled")
+        : uiText(m_settings, "Остановка сканирования...", "Stopping scan..."));
 }
 
 void MainWindow::saveSnapshot() {
@@ -1984,6 +2556,63 @@ void MainWindow::saveSnapshot() {
     }
     refreshFavoritesMenu();
     updateScanFooter(QStringLiteral("Снимок сохранен: %1").arg(path));
+}
+
+void MainWindow::deleteSnapshot() {
+    const auto snapshots = m_snapshots->listSnapshots();
+    if (snapshots.isEmpty()) {
+        QMessageBox::information(
+            this,
+            uiText(m_settings, "Удаление снимка", "Delete snapshot"),
+            uiText(m_settings, "Сохраненных снимков пока нет.", "There are no saved snapshots yet.")
+        );
+        return;
+    }
+
+    QStringList options;
+    for (const auto& item : snapshots) {
+        options.append(QStringLiteral("%1 | %2 | хостов: %3").arg(item.name, item.createdAt.left(19), QString::number(item.rowCount)));
+    }
+
+    bool ok = false;
+    const QString choice = QInputDialog::getItem(
+        this,
+        uiText(m_settings, "Удаление снимка", "Delete snapshot"),
+        uiText(m_settings, "Выберите снимок", "Choose snapshot"),
+        options,
+        0,
+        false,
+        &ok
+    );
+    if (!ok || choice.isEmpty()) {
+        return;
+    }
+
+    const int index = options.indexOf(choice);
+    if (index < 0 || index >= snapshots.size()) {
+        return;
+    }
+
+    const auto snapshot = snapshots.at(index);
+    const auto answer = QMessageBox::question(
+        this,
+        uiText(m_settings, "Удаление снимка", "Delete snapshot"),
+        uiText(m_settings, "Удалить снимок \"%1\"?", "Delete snapshot \"%1\"?").arg(snapshot.name),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No
+    );
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    QString error;
+    if (!m_snapshots->deleteSnapshot(snapshot.path, &error)) {
+        QMessageBox::warning(this, uiText(m_settings, "Удаление снимка", "Delete snapshot"), error);
+        return;
+    }
+
+    refreshFavoritesMenu();
+    updateScanFooter(uiText(m_settings, "Снимок удален: %1", "Snapshot deleted: %1").arg(snapshot.name));
 }
 
 void MainWindow::compareSnapshot() {
@@ -2028,15 +2657,20 @@ void MainWindow::refreshFavoritesMenu() {
         return;
     }
     m_favoritesMenu->clear();
-    m_favoritesMenu->addAction(QStringLiteral("Сохранить текущий снимок"), this, &MainWindow::saveSnapshot);
-    m_favoritesMenu->addAction(QStringLiteral("Сравнить со снимком..."), this, &MainWindow::compareSnapshot);
+    m_favoritesMenu->addAction(uiText(m_settings, "Сохранить текущий снимок", "Save current snapshot"), this, &MainWindow::saveSnapshot);
+    m_favoritesMenu->addAction(uiText(m_settings, "Удалить снимок...", "Delete snapshot..."), this, &MainWindow::deleteSnapshot);
+    m_favoritesMenu->addAction(uiText(m_settings, "Сравнить со снимком...", "Compare with snapshot..."), this, &MainWindow::compareSnapshot);
+    auto* compareAction = m_favoritesMenu->addAction(uiText(m_settings, "Сравнение сканов", "Scan comparison"));
+    compareAction->setCheckable(true);
+    compareAction->setChecked(m_scanCompareMode);
+    connect(compareAction, &QAction::toggled, this, &MainWindow::toggleScanCompareMode);
     const auto snapshots = m_snapshots->listSnapshots();
+    m_favoritesMenu->addSeparator();
     if (snapshots.isEmpty()) {
-        auto* emptyAction = m_favoritesMenu->addAction(QStringLiteral("Пока пусто"));
+        auto* emptyAction = m_favoritesMenu->addAction(uiText(m_settings, "Пока пусто", "Empty"));
         emptyAction->setEnabled(false);
         return;
     }
-    m_favoritesMenu->addSeparator();
     for (const auto& snapshot : snapshots) {
         const QString label = QStringLiteral("%1 | %2 | %3").arg(snapshot.name, snapshot.createdAt.left(19), QString::number(snapshot.rowCount));
         m_favoritesMenu->addAction(label, this, [this, path = snapshot.path]() { compareSnapshotPath(path); });
@@ -2154,8 +2788,12 @@ void MainWindow::appendScanRecord(const nt::ScanRecord& record) {
         fallbackCell(record.mac, QStringLiteral("-")),
         fallbackCell(record.vendor, QStringLiteral("unknown vendor")),
         fallbackCell(record.gateway, QStringLiteral("-")),
-        fallbackCell(record.port, QStringLiteral("-")),
+        scanPortCellText(m_settings, record.port),
+        normalizedTypeText(record.typeHint),
     };
+    if (m_scanCompareMode && m_scanCompareHasBaseline && !m_scanComparisonBaseline.contains(record.ip)) {
+        m_scanNewIps.insert(record.ip);
+    }
     const QString gatewayValue = fallbackCell(record.gateway, QStringLiteral("-"));
     const bool isGatewayHost = gatewayValue != QStringLiteral("-") && record.ip == gatewayValue;
     const QColor defaultBackground = isLightTheme() ? QColor("#ffffff") : QColor("#0f1318");
@@ -2171,19 +2809,34 @@ void MainWindow::appendScanRecord(const nt::ScanRecord& record) {
         }
         item->setText(values.at(col));
         item->setBackground(QBrush(isGatewayHost ? gatewayBackground : defaultBackground));
-        item->setForeground(QBrush(isGatewayHost ? gatewayForeground : defaultForeground));
+        if (col == 6) {
+            const bool isNewHost = m_scanCompareMode && m_scanNewIps.contains(record.ip);
+            item->setData(Qt::UserRole, normalizedTypeText(record.typeHint));
+            item->setText(scanTypeCellText(record.typeHint, isNewHost));
+            item->setTextAlignment(Qt::AlignCenter);
+            item->setToolTip(item->text());
+        }
+        if (col == 5) {
+            item->setTextAlignment(Qt::AlignCenter);
+        }
+        if (col == 6 && m_scanCompareMode && m_scanNewIps.contains(record.ip)) {
+            item->setForeground(QBrush(QColor("#7fda72")));
+        } else {
+            item->setForeground(QBrush(isGatewayHost ? gatewayForeground : defaultForeground));
+        }
         QFont font = item->font();
-        font.setBold(isGatewayHost);
+        font.setBold(isGatewayHost || (col == 6 && m_scanCompareMode && m_scanNewIps.contains(record.ip)));
         item->setFont(font);
         if (col == 0) {
             item->setIcon(statusOrb(record.status));
             item->setToolTip(
-                QStringLiteral("Статус: %1\nMAC: %2\nВендор: %3\nШлюз IP: %4\nОткрытые порты: %5\nМаршрут: %6\nМаска: %7%8")
+                QStringLiteral("Статус: %1\nMAC: %2\nВендор: %3\nШлюз IP: %4\nОткрытые порты: %5\nТип: %6\nМаршрут: %7\nМаска: %8%9")
                     .arg(nt::hostStatusText(record.status))
                     .arg(fallbackCell(record.mac, QStringLiteral("-")))
                     .arg(fallbackCell(record.vendor, QStringLiteral("unknown vendor")))
                     .arg(fallbackCell(record.gateway, QStringLiteral("-")))
-                    .arg(fallbackCell(record.port, QStringLiteral("-")))
+                    .arg(scanPortCellText(m_settings, record.port))
+                    .arg(normalizedTypeText(record.typeHint))
                     .arg(fallbackCell(record.name, QStringLiteral("-")))
                     .arg(fallbackCell(record.mask, QStringLiteral("-")))
                     .arg(isGatewayHost ? QStringLiteral("\nУзел является шлюзом сети.") : QString())
@@ -2223,17 +2876,36 @@ void MainWindow::finalizeScan(const QList<nt::ScanRecord>& records, int duration
     }
     if (m_scanStartButton != nullptr) {
         m_scanStartButton->setEnabled(true);
-        m_scanStartButton->setText(QStringLiteral("▶ Старт"));
+        m_scanStartButton->setText(uiText(m_settings, "▶ Старт", "▶ Start"));
     }
     if (m_scanStopButton != nullptr) {
         m_scanStopButton->setEnabled(false);
     }
     if (m_scanFooterThreadsLabel != nullptr) {
-        m_scanFooterThreadsLabel->setText(QStringLiteral("Потоки: 0"));
+        m_scanFooterThreadsLabel->setText(localizedFoundDevicesText(m_settings, m_scanRows.size()));
+    }
+    if (m_scanCompareMode) {
+        QSet<QString> currentIps;
+        for (const auto& record : m_scanRows) {
+            currentIps.insert(record.ip);
+        }
+        if (!m_scanCompareHasBaseline) {
+            m_scanNewIps.clear();
+            m_scanCompareHasBaseline = true;
+        } else {
+            m_scanNewIps = currentIps - m_scanComparisonBaseline;
+        }
+        m_scanComparisonBaseline = currentIps;
+        refreshScanComparisonBadges();
+    } else {
+        m_scanComparisonBaseline.clear();
+        m_scanNewIps.clear();
+        m_scanCompareHasBaseline = false;
+        refreshScanComparisonBadges();
     }
     updateScanSummary();
     updateSelectedHostPanel();
-    updateScanFooter(QStringLiteral("Готово | Завершено за %1 c").arg(durationMs / 1000.0, 0, 'f', 2));
+    updateScanFooter(localizedScanFinishedText(m_settings, durationMs));
 }
 
 void MainWindow::updateScanSummary() {
@@ -2255,21 +2927,31 @@ void MainWindow::updateScanSummary() {
         }
     }
     if (m_scanOnlineLabel != nullptr) {
-        m_scanOnlineLabel->setText(QStringLiteral("Онлайн: %1").arg(online));
+        m_scanOnlineLabel->setText(
+            isEnglishUi(m_settings)
+                ? QStringLiteral("Online: %1").arg(online)
+                : QStringLiteral("Онлайн: %1").arg(online)
+        );
+    }
+    if (m_scanFooterThreadsLabel != nullptr) {
+        m_scanFooterThreadsLabel->setText(localizedFoundDevicesText(m_settings, m_scanRows.size()));
     }
     if (m_scanFooterStateLabel != nullptr && !m_scanner->isRunning()) {
-        m_scanFooterStateLabel->setText(
-            QStringLiteral("Готово | Активных: %1 | Онлайн: %2 | MAC: %3")
-                .arg(m_scanRows.size())
-                .arg(online)
-                .arg(macCount)
-        );
+        updateScanFooter(localizedScanSummaryText(m_settings, m_scanRows.size(), online, macCount));
     }
 }
 
 void MainWindow::updateScanFooter(const QString& stateText) {
     if (m_scanFooterStateLabel != nullptr && !stateText.isEmpty()) {
         m_scanFooterStateLabel->setText(stateText);
+        const bool comparisonAccent = stateText == localizedComparisonModeText(m_settings);
+        if (comparisonAccent) {
+            m_scanFooterStateLabel->setStyleSheet(QStringLiteral(
+                "QLabel#statusCell { color:#f2c36a; font-weight:700; background:transparent; border:none; padding:3px 7px; font-size:11px; }"
+            ));
+        } else {
+            m_scanFooterStateLabel->setStyleSheet(QString());
+        }
     }
 }
 
@@ -2297,15 +2979,170 @@ void MainWindow::updateSelectedHostPanel() {
     m_hostLabels.value(QStringLiteral("status"))->setText(nt::hostStatusIndicator(item.status));
     m_hostLabels.value(QStringLiteral("mac"))->setText(item.mac.isEmpty() ? QStringLiteral("-") : item.mac);
     m_hostLabels.value(QStringLiteral("vendor"))->setText(item.vendor.isEmpty() ? QStringLiteral("-") : item.vendor);
-    m_hostLabels.value(QStringLiteral("type"))->setText(item.typeHint.isEmpty() ? QStringLiteral("-") : item.typeHint);
+    m_hostLabels.value(QStringLiteral("type"))->setText(normalizedTypeText(item.typeHint));
     m_hostLabels.value(QStringLiteral("name"))->setText(item.name.isEmpty() ? QStringLiteral("-") : item.name);
     m_hostLabels.value(QStringLiteral("gateway"))->setText(item.gateway.isEmpty() ? QStringLiteral("-") : item.gateway);
     m_hostLabels.value(QStringLiteral("mask"))->setText(item.mask.isEmpty() ? QStringLiteral("-") : item.mask);
 }
 
+void MainWindow::toggleScanCompareMode(bool enabled) {
+    m_scanCompareMode = enabled;
+    m_scanComparisonBaseline.clear();
+    m_scanNewIps.clear();
+    m_scanCompareHasBaseline = false;
+    refreshFavoritesMenu();
+    refreshScanComparisonBadges();
+    if (enabled) {
+        updateScanFooter(localizedComparisonModeText(m_settings));
+        return;
+    }
+    if (m_scanner != nullptr && m_scanner->isRunning()) {
+        updateScanFooter(uiText(m_settings, "Сканирование...", "Scanning..."));
+    } else {
+        updateScanSummary();
+    }
+}
+
+void MainWindow::refreshScanComparisonBadges() {
+    if (m_scanTable == nullptr) {
+        return;
+    }
+    const QColor defaultBackground = isLightTheme() ? QColor("#ffffff") : QColor("#0f1318");
+    const QColor defaultForeground = isLightTheme() ? QColor("#1f2730") : QColor("#eef2f6");
+    const QColor gatewayBackground = isLightTheme() ? QColor("#efe2b6") : QColor("#3a301d");
+    const QColor gatewayForeground = isLightTheme() ? QColor("#4c3812") : QColor("#f2d38a");
+
+    for (int row = 0; row < m_scanTable->rowCount(); ++row) {
+        const auto* ipItem = m_scanTable->item(row, 0);
+        const auto* gatewayItem = m_scanTable->item(row, 4);
+        auto* badgeItem = m_scanTable->item(row, 6);
+        if (ipItem == nullptr || badgeItem == nullptr) {
+            continue;
+        }
+        const QString ip = ipItem->text();
+        const bool isGatewayHost = gatewayItem != nullptr
+            && !gatewayItem->text().trimmed().isEmpty()
+            && gatewayItem->text() != QStringLiteral("-")
+            && gatewayItem->text() == ip;
+        const bool isNewHost = m_scanCompareMode && m_scanNewIps.contains(ip);
+        badgeItem->setText(scanTypeCellText(badgeItem->data(Qt::UserRole).toString(), isNewHost));
+        badgeItem->setTextAlignment(Qt::AlignCenter);
+        badgeItem->setBackground(QBrush(isGatewayHost ? gatewayBackground : defaultBackground));
+        badgeItem->setForeground(QBrush(isNewHost ? QColor("#7fda72") : (isGatewayHost ? gatewayForeground : defaultForeground)));
+        badgeItem->setToolTip(badgeItem->text());
+        QFont font = badgeItem->font();
+        font.setBold(isGatewayHost || isNewHost);
+        badgeItem->setFont(font);
+    }
+    m_scanTable->viewport()->update();
+}
+
+void MainWindow::openScanContextMenu(const QPoint& position) {
+    if (m_scanTable == nullptr) {
+        return;
+    }
+    const QModelIndex index = m_scanTable->indexAt(position);
+    if (!index.isValid()) {
+        return;
+    }
+    m_scanTable->selectRow(index.row());
+
+    QMenu menu(this);
+    auto* browserAction = menu.addAction(uiText(m_settings, "Открыть в браузере", "Open in browser"));
+    auto* pingAction = menu.addAction(uiText(m_settings, "Ping", "Ping"));
+    menu.addSeparator();
+    auto* sshAction = menu.addAction(uiText(m_settings, "Connect SSH", "Connect SSH"));
+    auto* telnetAction = menu.addAction(uiText(m_settings, "Connect Telnet", "Connect Telnet"));
+
+    QAction* selected = menu.exec(m_scanTable->viewport()->mapToGlobal(position));
+    if (selected == browserAction) {
+        openScanRowInBrowser(index.row());
+    } else if (selected == pingAction) {
+        openScanRowPing(index.row());
+    } else if (selected == sshAction) {
+        openScanRowSession(QStringLiteral("ssh"), index.row());
+    } else if (selected == telnetAction) {
+        openScanRowSession(QStringLiteral("telnet"), index.row());
+    }
+}
+
+void MainWindow::openScanRowInBrowser(int row) {
+    if (m_scanTable == nullptr || row < 0 || row >= m_scanTable->rowCount()) {
+        return;
+    }
+    const auto* ipItem = m_scanTable->item(row, 0);
+    if (ipItem == nullptr || ipItem->text().trimmed().isEmpty()) {
+        return;
+    }
+    QDesktopServices::openUrl(QUrl(QStringLiteral("http://%1").arg(ipItem->text().trimmed())));
+}
+
+void MainWindow::openScanRowPing(int row) {
+    if (m_scanTable == nullptr || row < 0 || row >= m_scanTable->rowCount()) {
+        return;
+    }
+    const auto* ipItem = m_scanTable->item(row, 0);
+    if (ipItem == nullptr || ipItem->text().trimmed().isEmpty()) {
+        return;
+    }
+    if (!openPingInTerminal(ipItem->text().trimmed())) {
+        QMessageBox::warning(this, uiText(m_settings, "Ping", "Ping"), uiText(m_settings, "Не удалось открыть терминал для ping.", "Failed to open terminal for ping."));
+    }
+}
+
+void MainWindow::openScanRowSession(const QString& kind, int row) {
+    if (m_scanTable == nullptr || row < 0 || row >= m_scanTable->rowCount()) {
+        return;
+    }
+    const auto* ipItem = m_scanTable->item(row, 0);
+    if (ipItem == nullptr || ipItem->text().trimmed().isEmpty()) {
+        return;
+    }
+    const QString ip = ipItem->text().trimmed();
+    if (kind == QStringLiteral("ssh")) {
+        prepareSessionFromScan(m_sshWidgets, ip, 22, QStringLiteral("SSH"), 5);
+    } else {
+        prepareSessionFromScan(m_telnetWidgets, ip, 23, QStringLiteral("Telnet"), 6);
+    }
+}
+
+void MainWindow::prepareSessionFromScan(SessionWidgets& widgets, const QString& host, quint16 port, const QString& kindLabel, int pageIndex) {
+    if (host.trimmed().isEmpty()) {
+        return;
+    }
+    if (pageIndex == 5 && m_sshSession->isConnected()) {
+        m_sshSession->close();
+    } else if (pageIndex == 6 && m_telnetSession->isConnected()) {
+        m_telnetSession->close();
+    }
+    if (m_navList != nullptr) {
+        m_navList->setCurrentRow(pageIndex);
+    } else {
+        syncCurrentPage(pageIndex);
+    }
+    widgets.nameEdit->setText(QStringLiteral("%1 %2").arg(kindLabel, host));
+    widgets.hostEdit->setText(host);
+    widgets.portSpin->setValue(port);
+    widgets.userEdit->clear();
+    widgets.passEdit->clear();
+    if (widgets.outputBox != nullptr) {
+        widgets.outputBox->clear();
+    }
+    if (widgets.statusLabel != nullptr) {
+        widgets.statusLabel->setText(uiText(m_settings, "Не подключено", "Not connected"));
+    }
+    if (widgets.connectButton != nullptr) {
+        widgets.connectButton->setText(localizedConnectText(m_settings, false));
+    }
+    if (widgets.userEdit != nullptr) {
+        widgets.userEdit->setFocus();
+        widgets.userEdit->selectAll();
+    }
+}
+
 void MainWindow::sendHttpRequest() {
     if (m_requestUrlEdit->text().trimmed().isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("HTTP / REQ"), QStringLiteral("Поле URL пустое."));
+        QMessageBox::warning(this, QStringLiteral("HTTP / REQ"), uiText(m_settings, "Поле URL пустое.", "URL field is empty."));
         return;
     }
 
@@ -2319,7 +3156,13 @@ void MainWindow::sendHttpRequest() {
         const auto document = QJsonDocument::fromJson(data, &error);
         if (error.error != QJsonParseError::NoError || !document.isObject()) {
             parseFailed = true;
-            QMessageBox::warning(this, QStringLiteral("HTTP / REQ"), title + QStringLiteral(" должны быть JSON-объектом."));
+            QMessageBox::warning(
+                this,
+                QStringLiteral("HTTP / REQ"),
+                isEnglishUi(m_settings)
+                    ? QStringLiteral("%1 must be a JSON object.").arg(title)
+                    : title + QStringLiteral(" должны быть JSON-объектом.")
+            );
             return {};
         }
         return document.object();
@@ -2331,8 +3174,8 @@ void MainWindow::sendHttpRequest() {
     if (!spec.url.contains(QRegularExpression(QStringLiteral("^[a-zA-Z][a-zA-Z0-9+.-]*://")))) {
         spec.url.prepend(QStringLiteral("http://"));
     }
-    spec.headers = parseObject(m_requestHeadersEdit, QStringLiteral("Заголовки"));
-    spec.params = parseObject(m_requestParamsEdit, QStringLiteral("Параметры"));
+    spec.headers = parseObject(m_requestHeadersEdit, uiText(m_settings, "Заголовки", "Headers"));
+    spec.params = parseObject(m_requestParamsEdit, uiText(m_settings, "Параметры", "Params"));
     if (parseFailed) {
         return;
     }
@@ -2344,19 +3187,11 @@ void MainWindow::sendHttpRequest() {
     QTextCursor cursor(m_requestResponseEdit->document());
     cursor.movePosition(QTextCursor::End);
 
-    QTextCharFormat arrowFormat;
-    arrowFormat.setFont(fixedFont());
-    arrowFormat.setFontWeight(QFont::Bold);
-    arrowFormat.setForeground(QColor("#66b7ff"));
-    QTextCharFormat methodFormat = arrowFormat;
-    methodFormat.setForeground(httpMethodColor(spec.method));
     QTextCharFormat textFormat;
     textFormat.setFont(fixedFont());
     textFormat.setForeground(isLightTheme() ? QColor("#1f2730") : QColor("#eef2f6"));
 
-    cursor.insertText(QStringLiteral("➜ "), arrowFormat);
-    cursor.insertText(spec.method.toUpper(), methodFormat);
-    cursor.insertText(QStringLiteral(" %1\n").arg(spec.url), textFormat);
+    cursor.insertText(QStringLiteral("Network Tools -> %1 [%2]\n").arg(spec.url, spec.method.toUpper()), textFormat);
     m_requestResponseEdit->setTextCursor(cursor);
     m_requestResponseEdit->ensureCursorVisible();
 
@@ -2395,12 +3230,12 @@ void MainWindow::sendHttpRequest() {
 void MainWindow::openHttpHistory() {
     const QJsonArray history = m_settings->value(QStringLiteral("http_history"), QJsonArray{}).toArray();
     if (history.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("HTTP History"), QStringLiteral("История запросов пока пуста."));
+        QMessageBox::information(this, QStringLiteral("HTTP History"), uiText(m_settings, "История запросов пока пуста.", "Request history is empty."));
         return;
     }
 
     QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("HTTP History"));
+    dialog.setWindowTitle(uiText(m_settings, "История HTTP", "HTTP History"));
     dialog.resize(760, 440);
 
     auto* root = new QVBoxLayout(&dialog);
@@ -2424,7 +3259,7 @@ void MainWindow::openHttpHistory() {
     }
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    auto* applyButton = buttons->addButton(QStringLiteral("Повторить"), QDialogButtonBox::AcceptRole);
+    auto* applyButton = buttons->addButton(uiText(m_settings, "Повторить", "Reuse"), QDialogButtonBox::AcceptRole);
     root->addWidget(buttons);
 
     const auto applySelection = [this, list, &dialog]() {
@@ -2495,9 +3330,9 @@ void MainWindow::toggleSerial() {
         portName,
         m_serialWidgets.baudCombo->currentText().toInt(),
         m_serialWidgets.bitsCombo->currentText().toInt(),
-        m_serialWidgets.parityCombo->currentText(),
+        comboValue(m_serialWidgets.parityCombo),
         m_serialWidgets.stopBitsCombo->currentText(),
-        m_serialWidgets.flowControlCombo->currentText(),
+        comboValue(m_serialWidgets.flowControlCombo),
         &error
     );
     if (!ok) {
@@ -2508,12 +3343,19 @@ void MainWindow::toggleSerial() {
     section.insert(QStringLiteral("port_name"), portName);
     section.insert(QStringLiteral("baud"), m_serialWidgets.baudCombo->currentText());
     section.insert(QStringLiteral("data_bits"), m_serialWidgets.bitsCombo->currentText());
-    section.insert(QStringLiteral("parity"), m_serialWidgets.parityCombo->currentText());
+    section.insert(QStringLiteral("parity"), comboValue(m_serialWidgets.parityCombo));
     section.insert(QStringLiteral("stop_bits"), m_serialWidgets.stopBitsCombo->currentText());
-    section.insert(QStringLiteral("flow_control"), m_serialWidgets.flowControlCombo->currentText());
+    section.insert(QStringLiteral("flow_control"), comboValue(m_serialWidgets.flowControlCombo));
     m_settings->setSection(QStringLiteral("serial"), section);
     m_settings->save();
-    appendTrafficEntry(m_serialWidgets.outputBox, QColor("#b0bac5"), QStringLiteral("INFO"), QStringLiteral("Подключено %1 @ %2").arg(portName, m_serialWidgets.baudCombo->currentText()));
+    appendTrafficEntry(
+        m_serialWidgets.outputBox,
+        QColor("#b0bac5"),
+        QStringLiteral("INFO"),
+        isEnglishUi(m_settings)
+            ? QStringLiteral("Connected %1 @ %2").arg(portName, m_serialWidgets.baudCombo->currentText())
+            : QStringLiteral("Подключено %1 @ %2").arg(portName, m_serialWidgets.baudCombo->currentText())
+    );
 }
 
 void MainWindow::toggleTcp() {
@@ -2565,7 +3407,14 @@ void MainWindow::toggleUdp() {
     section.insert(QStringLiteral("reuse_address"), m_udpWidgets.reuseAddressCheck->isChecked());
     m_settings->setSection(QStringLiteral("udp"), section);
     m_settings->save();
-    appendTrafficEntry(m_udpWidgets.outputBox, QColor("#b0bac5"), QStringLiteral("INFO"), QStringLiteral("Открыт UDP :%1").arg(m_udpSession->localPort()));
+    appendTrafficEntry(
+        m_udpWidgets.outputBox,
+        QColor("#b0bac5"),
+        QStringLiteral("INFO"),
+        isEnglishUi(m_settings)
+            ? QStringLiteral("UDP open :%1").arg(m_udpSession->localPort())
+            : QStringLiteral("Открыт UDP :%1").arg(m_udpSession->localPort())
+    );
 }
 
 QByteArray MainWindow::payloadFromText(const QString& text, bool hexEnabled) {
@@ -2620,11 +3469,12 @@ QByteArray MainWindow::applyLineEnding(QByteArray payload, const QString& eolNam
     if (hexEnabled) {
         return payload;
     }
-    if (eolName == QStringLiteral("CR")) {
+    const QString eolKey = normalizedEolKey(eolName);
+    if (eolKey == QStringLiteral("cr")) {
         payload.append('\r');
-    } else if (eolName == QStringLiteral("LF")) {
+    } else if (eolKey == QStringLiteral("lf")) {
         payload.append('\n');
-    } else if (eolName == QStringLiteral("CRLF")) {
+    } else if (eolKey == QStringLiteral("crlf")) {
         payload.append("\r\n");
     }
     return payload;
@@ -2671,7 +3521,7 @@ void MainWindow::loadQuickCommands(const QString& key, StreamWidgets& widgets) {
         widgets.inputEdit->setText(section.value(QStringLiteral("draft")).toString());
     }
     if (widgets.eolCombo != nullptr) {
-        widgets.eolCombo->setCurrentText(section.value(QStringLiteral("eol")).toString(QStringLiteral("Нет")));
+        setComboByData(widgets.eolCombo, normalizedEolKey(section.value(QStringLiteral("eol")).toString(QStringLiteral("none"))));
     }
 }
 
@@ -2686,7 +3536,7 @@ void MainWindow::saveQuickCommands(const QString& key, const StreamWidgets& widg
         section.insert(QStringLiteral("draft"), widgets.inputEdit->text());
     }
     if (widgets.eolCombo != nullptr) {
-        section.insert(QStringLiteral("eol"), widgets.eolCombo->currentText());
+        section.insert(QStringLiteral("eol"), comboValue(widgets.eolCombo));
     }
     m_settings->setSection(key, section);
     m_settings->save();
@@ -2712,7 +3562,7 @@ void MainWindow::sendSerialPayload() {
     if (payload.isEmpty()) {
         return;
     }
-    payload = applyLineEnding(payload, m_serialWidgets.eolCombo->currentText(), m_serialWidgets.hexCheck->isChecked());
+    payload = applyLineEnding(payload, comboValue(m_serialWidgets.eolCombo), m_serialWidgets.hexCheck->isChecked());
     QString error;
     m_serialSession->sendBytes(payload, &error);
     if (!error.isEmpty()) {
@@ -2731,7 +3581,7 @@ void MainWindow::sendTcpPayload() {
         appendTrafficEntry(m_tcpWidgets.outputBox, QColor("#d85d5d"), QStringLiteral("ERR"), QStringLiteral("TCP не подключен"));
         return;
     }
-    payload = applyLineEnding(payload, m_tcpWidgets.eolCombo->currentText(), m_tcpWidgets.hexCheck->isChecked());
+    payload = applyLineEnding(payload, comboValue(m_tcpWidgets.eolCombo), m_tcpWidgets.hexCheck->isChecked());
     m_tcpSession->sendBytes(payload);
     appendTrafficEntry(m_tcpWidgets.outputBox, QColor("#7fda72"), QStringLiteral("TX"), displayBytes(payload, m_tcpWidgets.hexCheck->isChecked()));
 }
@@ -2741,7 +3591,7 @@ void MainWindow::sendUdpPayload() {
     if (payload.isEmpty()) {
         return;
     }
-    payload = applyLineEnding(payload, m_udpWidgets.eolCombo->currentText(), m_udpWidgets.hexCheck->isChecked());
+    payload = applyLineEnding(payload, comboValue(m_udpWidgets.eolCombo), m_udpWidgets.hexCheck->isChecked());
     QString error;
     m_udpSession->sendDatagram(
         m_udpWidgets.hostEdit->text().trimmed(),
@@ -2948,6 +3798,387 @@ QTextCharFormat* MainWindow::sessionTerminalFormatForBox(QTextEdit* box) {
         return &m_telnetTerminalFormat;
     }
     return nullptr;
+}
+
+void MainWindow::loadSnmpProfiles() {
+    if (m_snmpWidgets.profiles == nullptr) {
+        return;
+    }
+    m_snmpWidgets.profiles->clear();
+    const auto profiles = m_settings->sessionProfiles(QStringLiteral("snmp"), 161);
+    for (const auto& profile : profiles) {
+        const QString community = profile.username.trimmed().isEmpty() ? QStringLiteral("public") : profile.username.trimmed();
+        auto* item = new QListWidgetItem(QStringLiteral("%1\n%2 | %3:%4").arg(profile.name, community, profile.host, QString::number(profile.port)));
+        item->setData(Qt::UserRole, QVariant::fromValue(profile));
+        m_snmpWidgets.profiles->addItem(item);
+    }
+    if (m_snmpWidgets.profiles->count() > 0) {
+        m_snmpWidgets.profiles->setCurrentRow(0);
+    } else {
+        newSnmpProfile();
+    }
+}
+
+void MainWindow::applySnmpProfile(const nt::SessionProfile& profile) {
+    m_snmpWidgets.nameEdit->setText(profile.name);
+    m_snmpWidgets.hostEdit->setText(profile.host);
+    m_snmpWidgets.portSpin->setValue(profile.port == 0 ? 161 : profile.port);
+    m_snmpWidgets.communityEdit->setText(profile.username);
+    m_snmpWidgets.writeCommunityEdit->setText(profile.password);
+}
+
+nt::SessionProfile MainWindow::currentSnmpProfile() const {
+    nt::SessionProfile profile;
+    profile.name = m_snmpWidgets.nameEdit != nullptr ? m_snmpWidgets.nameEdit->text().trimmed() : QString();
+    profile.host = m_snmpWidgets.hostEdit != nullptr ? m_snmpWidgets.hostEdit->text().trimmed() : QString();
+    profile.port = m_snmpWidgets.portSpin != nullptr ? static_cast<quint16>(m_snmpWidgets.portSpin->value()) : 161;
+    profile.username = m_snmpWidgets.communityEdit != nullptr ? m_snmpWidgets.communityEdit->text().trimmed() : QString();
+    profile.password = m_snmpWidgets.writeCommunityEdit != nullptr ? m_snmpWidgets.writeCommunityEdit->text() : QString();
+    if (profile.port == 0) {
+        profile.port = 161;
+    }
+    if (profile.name.isEmpty()) {
+        profile.name = QStringLiteral("%1:%2").arg(profile.host, QString::number(profile.port));
+    }
+    return profile;
+}
+
+void MainWindow::saveSnmpProfile() {
+    const auto profile = currentSnmpProfile();
+    if (profile.host.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("SNMP"), uiText(m_settings, "Поле хоста пустое.", "Host field is empty."));
+        return;
+    }
+
+    QList<nt::SessionProfile> profiles = m_settings->sessionProfiles(QStringLiteral("snmp"), 161);
+    profiles.erase(std::remove_if(profiles.begin(), profiles.end(), [&](const auto& item) {
+        return item.name == profile.name;
+    }), profiles.end());
+    profiles.prepend(profile);
+    while (profiles.size() > 80) {
+        profiles.removeLast();
+    }
+
+    m_settings->storeSessionProfiles(QStringLiteral("snmp"), profiles, profile);
+    auto section = m_settings->section(QStringLiteral("snmp"));
+    section.insert(QStringLiteral("base_oid"), m_snmpWidgets.baseOidEdit->text().trimmed());
+    section.insert(QStringLiteral("version"), comboValue(m_snmpWidgets.versionCombo));
+    m_settings->setSection(QStringLiteral("snmp"), section);
+    m_settings->save();
+    loadSnmpProfiles();
+}
+
+void MainWindow::deleteSnmpProfile() {
+    if (m_snmpWidgets.profiles == nullptr) {
+        return;
+    }
+    const auto* item = m_snmpWidgets.profiles->currentItem();
+    if (item == nullptr) {
+        return;
+    }
+    const auto current = item->data(Qt::UserRole).value<nt::SessionProfile>();
+    QList<nt::SessionProfile> profiles = m_settings->sessionProfiles(QStringLiteral("snmp"), 161);
+    profiles.erase(std::remove_if(profiles.begin(), profiles.end(), [&](const auto& profile) {
+        return profile.name == current.name;
+    }), profiles.end());
+    m_settings->storeSessionProfiles(QStringLiteral("snmp"), profiles, currentSnmpProfile());
+    m_settings->save();
+    loadSnmpProfiles();
+}
+
+void MainWindow::newSnmpProfile() {
+    const auto section = m_settings->section(QStringLiteral("snmp"));
+    m_snmpWidgets.nameEdit->clear();
+    m_snmpWidgets.hostEdit->setText(section.value(QStringLiteral("host")).toString(QStringLiteral("127.0.0.1")));
+    m_snmpWidgets.portSpin->setValue(section.value(QStringLiteral("port")).toInt(161));
+    m_snmpWidgets.communityEdit->setText(section.value(QStringLiteral("username")).toString(QStringLiteral("public")));
+    m_snmpWidgets.writeCommunityEdit->clear();
+    m_snmpWidgets.versionCombo->setCurrentIndex(qMax(0, m_snmpWidgets.versionCombo->findData(section.value(QStringLiteral("version")).toString(QStringLiteral("2c")))));
+    m_snmpWidgets.baseOidEdit->setText(section.value(QStringLiteral("base_oid")).toString(QStringLiteral(".1.3.6.1.2.1.1")));
+    if (m_snmpWidgets.table != nullptr) {
+        m_snmpWidgets.table->setRowCount(0);
+    }
+    if (m_snmpWidgets.statusLabel != nullptr) {
+        m_snmpWidgets.statusLabel->setStyleSheet(QString());
+        m_snmpWidgets.statusLabel->setText(uiText(m_settings, "OID еще не загружены", "OIDs are not loaded yet"));
+    }
+}
+
+void MainWindow::loadSnmpOidList() {
+    if (m_snmpWidgets.hostEdit == nullptr || m_snmpWidgets.table == nullptr) {
+        return;
+    }
+
+    const QString host = m_snmpWidgets.hostEdit->text().trimmed();
+    const QString community = m_snmpWidgets.communityEdit->text().trimmed();
+    const QString baseOid = m_snmpWidgets.baseOidEdit->text().trimmed().isEmpty()
+        ? QStringLiteral(".1.3.6.1.2.1.1")
+        : m_snmpWidgets.baseOidEdit->text().trimmed();
+    if (host.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("SNMP"), uiText(m_settings, "Поле хоста пустое.", "Host field is empty."));
+        return;
+    }
+    if (community.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("SNMP"), uiText(m_settings, "Укажите community для чтения.", "Enter read community."));
+        return;
+    }
+
+    auto section = m_settings->section(QStringLiteral("snmp"));
+    section.insert(QStringLiteral("base_oid"), baseOid);
+    section.insert(QStringLiteral("version"), comboValue(m_snmpWidgets.versionCombo));
+    m_settings->setSection(QStringLiteral("snmp"), section);
+    m_settings->save();
+
+    if (m_snmpWidgets.statusLabel != nullptr) {
+        m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#f2c36a;"));
+        m_snmpWidgets.statusLabel->setText(uiText(m_settings, "Загрузка OID...", "Loading OIDs..."));
+    }
+    if (m_snmpWidgets.loadButton != nullptr) {
+        m_snmpWidgets.loadButton->setEnabled(false);
+    }
+
+    auto* process = new QProcess(this);
+    const QStringList args {
+        QStringLiteral("-v"), comboValue(m_snmpWidgets.versionCombo),
+        QStringLiteral("-c"), community,
+        QStringLiteral("%1:%2").arg(host).arg(m_snmpWidgets.portSpin->value()),
+        baseOid,
+    };
+
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
+        if (m_snmpWidgets.loadButton != nullptr) {
+            m_snmpWidgets.loadButton->setEnabled(true);
+        }
+        if (m_snmpWidgets.statusLabel != nullptr) {
+            m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#ef7b7b;"));
+            m_snmpWidgets.statusLabel->setText(uiText(m_settings, "Не удалось запустить snmpwalk.", "Failed to start snmpwalk."));
+        }
+        process->deleteLater();
+    });
+
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, process](int exitCode, QProcess::ExitStatus exitStatus) {
+        const QString stdOut = QString::fromUtf8(process->readAllStandardOutput());
+        const QString stdErr = QString::fromUtf8(process->readAllStandardError()).trimmed();
+        if (m_snmpWidgets.loadButton != nullptr) {
+            m_snmpWidgets.loadButton->setEnabled(true);
+        }
+
+        if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+            if (m_snmpWidgets.statusLabel != nullptr) {
+                m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#ef7b7b;"));
+                m_snmpWidgets.statusLabel->setText(stdErr.isEmpty()
+                    ? uiText(m_settings, "SNMP-опрос завершился с ошибкой.", "SNMP walk failed.")
+                    : stdErr);
+            }
+            process->deleteLater();
+            return;
+        }
+
+        const QStringList lines = stdOut.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
+        m_snmpTablePopulating = true;
+        m_snmpWidgets.table->setRowCount(0);
+        int inserted = 0;
+        for (const QString& line : lines) {
+            const auto parsed = parseSnmpLine(line);
+            if (!parsed.valid) {
+                continue;
+            }
+            const int row = m_snmpWidgets.table->rowCount();
+            m_snmpWidgets.table->insertRow(row);
+
+            auto* oidItem = new QTableWidgetItem(parsed.oid);
+            oidItem->setFlags(oidItem->flags() & ~Qt::ItemIsEditable);
+            oidItem->setToolTip(parsed.oid);
+
+            auto* descItem = new QTableWidgetItem(describeOidRu(parsed.oid));
+            descItem->setFlags(descItem->flags() & ~Qt::ItemIsEditable);
+
+            auto* typeItem = new QTableWidgetItem(snmpTypeDisplayText(parsed.rawType));
+            typeItem->setData(Qt::UserRole, parsed.rawType);
+            typeItem->setFlags(typeItem->flags() & ~Qt::ItemIsEditable);
+            typeItem->setTextAlignment(Qt::AlignCenter);
+
+            auto* valueItem = new QTableWidgetItem(snmpValueDisplayText(parsed.rawType, parsed.value));
+            valueItem->setData(Qt::UserRole, parsed.rawType);
+            valueItem->setData(Qt::UserRole + 1, snmpValueDisplayText(parsed.rawType, parsed.value));
+            valueItem->setToolTip(parsed.value);
+
+            m_snmpWidgets.table->setItem(row, 0, oidItem);
+            m_snmpWidgets.table->setItem(row, 1, descItem);
+            m_snmpWidgets.table->setItem(row, 2, typeItem);
+            m_snmpWidgets.table->setItem(row, 3, valueItem);
+            ++inserted;
+        }
+        m_snmpTablePopulating = false;
+
+        if (inserted > 0) {
+            m_snmpWidgets.table->selectRow(0);
+            if (m_snmpWidgets.statusLabel != nullptr) {
+                m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#6fd27f;"));
+                m_snmpWidgets.statusLabel->setText(
+                    isEnglishUi(m_settings)
+                        ? QStringLiteral("Loaded OIDs: %1").arg(inserted)
+                        : QStringLiteral("Загружено OID: %1").arg(inserted)
+                );
+            }
+        } else if (m_snmpWidgets.statusLabel != nullptr) {
+            m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#f2c36a;"));
+            m_snmpWidgets.statusLabel->setText(uiText(m_settings, "OID по этому запросу не найдены.", "No OIDs found for this query."));
+        }
+        process->deleteLater();
+    });
+
+    process->start(QStringLiteral("/usr/bin/snmpwalk"), args);
+}
+
+void MainWindow::applySnmpSelectedValue() {
+    if (m_snmpWidgets.table == nullptr) {
+        return;
+    }
+    const int row = m_snmpWidgets.table->currentRow();
+    if (row < 0) {
+        QMessageBox::warning(this, QStringLiteral("SNMP"), uiText(m_settings, "Сначала выберите строку OID.", "Select an OID row first."));
+        return;
+    }
+
+    auto* oidItem = m_snmpWidgets.table->item(row, 0);
+    auto* typeItem = m_snmpWidgets.table->item(row, 2);
+    auto* valueItem = m_snmpWidgets.table->item(row, 3);
+    if (oidItem == nullptr || typeItem == nullptr || valueItem == nullptr) {
+        return;
+    }
+
+    const QString host = m_snmpWidgets.hostEdit->text().trimmed();
+    const QString writeCommunity = m_snmpWidgets.writeCommunityEdit->text().trimmed().isEmpty()
+        ? m_snmpWidgets.communityEdit->text().trimmed()
+        : m_snmpWidgets.writeCommunityEdit->text().trimmed();
+    if (host.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("SNMP"), uiText(m_settings, "Поле хоста пустое.", "Host field is empty."));
+        return;
+    }
+    if (writeCommunity.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("SNMP"), uiText(m_settings, "Укажите community для записи.", "Enter write community."));
+        return;
+    }
+
+    const QString rawType = typeItem->data(Qt::UserRole).toString();
+    const QString typeToken = snmpSetTypeToken(rawType);
+    if (typeToken.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("SNMP"), uiText(m_settings, "Этот тип OID нельзя изменить автоматически.", "This OID type cannot be changed automatically."));
+        return;
+    }
+
+    const QString previousValue = valueItem->data(Qt::UserRole + 1).toString();
+    const QString newValue = valueItem->text().trimmed();
+    if (newValue.isEmpty() && typeToken != QStringLiteral("s")) {
+        QMessageBox::warning(this, QStringLiteral("SNMP"), uiText(m_settings, "Поле значения пустое.", "Value field is empty."));
+        m_snmpTablePopulating = true;
+        valueItem->setText(previousValue);
+        m_snmpTablePopulating = false;
+        return;
+    }
+
+    if (m_snmpWidgets.loadButton != nullptr) {
+        m_snmpWidgets.loadButton->setEnabled(false);
+    }
+    if (m_snmpWidgets.statusLabel != nullptr) {
+        m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#f2c36a;"));
+        m_snmpWidgets.statusLabel->setText(uiText(m_settings, "Изменение OID...", "Updating OID..."));
+    }
+
+    auto* process = new QProcess(this);
+    const QStringList args {
+        QStringLiteral("-v"), comboValue(m_snmpWidgets.versionCombo),
+        QStringLiteral("-c"), writeCommunity,
+        QStringLiteral("%1:%2").arg(host).arg(m_snmpWidgets.portSpin->value()),
+        oidItem->text(),
+        typeToken,
+        newValue,
+    };
+
+    connect(process, &QProcess::errorOccurred, this, [this, process, row, previousValue](QProcess::ProcessError) {
+        if (m_snmpWidgets.loadButton != nullptr) {
+            m_snmpWidgets.loadButton->setEnabled(true);
+        }
+        if (auto* valueItem = m_snmpWidgets.table->item(row, 3)) {
+            m_snmpTablePopulating = true;
+            valueItem->setText(previousValue);
+            m_snmpTablePopulating = false;
+        }
+        if (m_snmpWidgets.statusLabel != nullptr) {
+            m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#ef7b7b;"));
+            m_snmpWidgets.statusLabel->setText(uiText(m_settings, "Не удалось запустить snmpset.", "Failed to start snmpset."));
+        }
+        process->deleteLater();
+    });
+
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, process, row, previousValue](int exitCode, QProcess::ExitStatus exitStatus) {
+        const QString stdOut = QString::fromUtf8(process->readAllStandardOutput());
+        const QString stdErr = QString::fromUtf8(process->readAllStandardError()).trimmed();
+        if (m_snmpWidgets.loadButton != nullptr) {
+            m_snmpWidgets.loadButton->setEnabled(true);
+        }
+
+        if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+            if (auto* valueItem = m_snmpWidgets.table->item(row, 3)) {
+                m_snmpTablePopulating = true;
+                valueItem->setText(previousValue);
+                m_snmpTablePopulating = false;
+            }
+            if (m_snmpWidgets.statusLabel != nullptr) {
+                m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#ef7b7b;"));
+                m_snmpWidgets.statusLabel->setText(stdErr.isEmpty()
+                    ? uiText(m_settings, "Не удалось изменить значение OID.", "Failed to update OID value.")
+                    : stdErr);
+            }
+            process->deleteLater();
+            return;
+        }
+
+        const QStringList lines = stdOut.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
+        for (const QString& line : lines) {
+            const auto parsed = parseSnmpLine(line);
+            if (!parsed.valid) {
+                continue;
+            }
+            m_snmpTablePopulating = true;
+            if (auto* typeItem = m_snmpWidgets.table->item(row, 2)) {
+                typeItem->setText(snmpTypeDisplayText(parsed.rawType));
+                typeItem->setData(Qt::UserRole, parsed.rawType);
+            }
+            if (auto* valueItem = m_snmpWidgets.table->item(row, 3)) {
+                valueItem->setText(snmpValueDisplayText(parsed.rawType, parsed.value));
+                valueItem->setData(Qt::UserRole, parsed.rawType);
+                valueItem->setData(Qt::UserRole + 1, snmpValueDisplayText(parsed.rawType, parsed.value));
+                valueItem->setToolTip(parsed.value);
+            }
+            m_snmpTablePopulating = false;
+            break;
+        }
+
+        if (m_snmpWidgets.statusLabel != nullptr) {
+            m_snmpWidgets.statusLabel->setStyleSheet(QStringLiteral("color:#6fd27f;"));
+            m_snmpWidgets.statusLabel->setText(uiText(m_settings, "Значение OID обновлено.", "OID value updated."));
+        }
+        process->deleteLater();
+    });
+
+    process->start(QStringLiteral("/usr/bin/snmpset"), args);
+}
+
+void MainWindow::handleSnmpValueEdited(QTableWidgetItem* item) {
+    if (m_snmpTablePopulating || item == nullptr || item->column() != 3) {
+        return;
+    }
+    const QString previousValue = item->data(Qt::UserRole + 1).toString();
+    const QString currentValue = item->text().trimmed();
+    if (previousValue == currentValue) {
+        return;
+    }
+    if (m_snmpWidgets.table != nullptr) {
+        m_snmpWidgets.table->setCurrentItem(item);
+    }
+    applySnmpSelectedValue();
 }
 
 void MainWindow::loadSessionProfiles(const QString& kind, SessionWidgets& widgets, quint16 defaultPort) {

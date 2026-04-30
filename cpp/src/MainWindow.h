@@ -5,6 +5,7 @@
 #include <QColor>
 #include <QMainWindow>
 #include <QMap>
+#include <QSet>
 #include <QTextCharFormat>
 
 class QComboBox;
@@ -13,12 +14,14 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
+class QPoint;
 class QPushButton;
 class QEvent;
 class QMenu;
 class QSpinBox;
 class QStackedWidget;
 class QTableWidget;
+class QTableWidgetItem;
 class QTextEdit;
 class QTimer;
 
@@ -59,6 +62,21 @@ private:
         QLabel* statusLabel {nullptr};
         QTextEdit* outputBox {nullptr};
         QLineEdit* inputEdit {nullptr};
+    };
+
+    struct SnmpWidgets {
+        QListWidget* profiles {nullptr};
+        QLineEdit* nameEdit {nullptr};
+        QLineEdit* hostEdit {nullptr};
+        QSpinBox* portSpin {nullptr};
+        QComboBox* versionCombo {nullptr};
+        QLineEdit* communityEdit {nullptr};
+        QLineEdit* writeCommunityEdit {nullptr};
+        QLineEdit* baseOidEdit {nullptr};
+        QPushButton* loadButton {nullptr};
+        QPushButton* saveButton {nullptr};
+        QLabel* statusLabel {nullptr};
+        QTableWidget* table {nullptr};
     };
 
     struct StreamWidgets {
@@ -106,6 +124,7 @@ private:
     QWidget* createTcpPage();
     QWidget* createUdpPage();
     QWidget* createSessionPage(const QString& kind, SessionWidgets& widgets, quint16 defaultPort);
+    QWidget* createSnmpPage();
     QWidget* createPlaceholderPage(const QString& title, const QString& text);
     void syncCurrentPage(int row);
 
@@ -120,6 +139,7 @@ private:
     void startScan();
     void stopScan();
     void saveSnapshot();
+    void deleteSnapshot();
     void compareSnapshot();
     void compareSnapshotPath(const QString& path);
     void refreshFavoritesMenu();
@@ -130,6 +150,22 @@ private:
     void updateScanSummary();
     void updateScanFooter(const QString& stateText = QString());
     void updateSelectedHostPanel();
+    void toggleScanCompareMode(bool enabled);
+    void refreshScanComparisonBadges();
+    void openScanContextMenu(const QPoint& position);
+    void openScanRowInBrowser(int row);
+    void openScanRowPing(int row);
+    void openScanRowSession(const QString& kind, int row);
+    void prepareSessionFromScan(SessionWidgets& widgets, const QString& host, quint16 port, const QString& kindLabel, int pageIndex);
+    void loadSnmpProfiles();
+    void applySnmpProfile(const nt::SessionProfile& profile);
+    nt::SessionProfile currentSnmpProfile() const;
+    void saveSnmpProfile();
+    void deleteSnmpProfile();
+    void newSnmpProfile();
+    void loadSnmpOidList();
+    void applySnmpSelectedValue();
+    void handleSnmpValueEdited(QTableWidgetItem* item);
     static int findRowByIp(QTableWidget* table, const QString& ip);
 
     void sendHttpRequest();
@@ -196,6 +232,10 @@ private:
     QTimer* m_scanAutoScanTimer {nullptr};
     QMap<QString, QLabel*> m_hostLabels;
     QList<nt::ScanRecord> m_scanRows;
+    QSet<QString> m_scanComparisonBaseline;
+    QSet<QString> m_scanNewIps;
+    bool m_scanCompareMode {false};
+    bool m_scanCompareHasBaseline {false};
     quint64 m_currentScanGeneration {0};
 
     QComboBox* m_requestMethodCombo {nullptr};
@@ -213,6 +253,7 @@ private:
     UdpWidgets m_udpWidgets;
     SessionWidgets m_sshWidgets;
     SessionWidgets m_telnetWidgets;
+    SnmpWidgets m_snmpWidgets;
     QString m_sshDraft;
     QString m_telnetDraft;
     int m_sshDraftCursor {0};
@@ -221,4 +262,5 @@ private:
     QTextCharFormat m_telnetTerminalBaseFormat;
     QTextCharFormat m_sshTerminalFormat;
     QTextCharFormat m_telnetTerminalFormat;
+    bool m_snmpTablePopulating {false};
 };

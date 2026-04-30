@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMap>
@@ -216,6 +217,25 @@ bool SnapshotService::saveSnapshot(
 
     if (outPath != nullptr) {
         *outPath = path;
+    }
+    return true;
+}
+
+bool SnapshotService::deleteSnapshot(const QString& path, QString* errorText) const {
+    const QFileInfo info(path);
+    if (!info.exists()) {
+        if (errorText != nullptr) {
+            *errorText = QStringLiteral("Снимок не найден: %1").arg(path);
+        }
+        return false;
+    }
+
+    QFile file(path);
+    if (!file.remove()) {
+        if (errorText != nullptr) {
+            *errorText = QStringLiteral("Не удалось удалить снимок: %1").arg(path);
+        }
+        return false;
     }
     return true;
 }
