@@ -34,4 +34,4 @@ private:
     bool m_passwordSent {false};
 };
 
-}
+} // namespace nt

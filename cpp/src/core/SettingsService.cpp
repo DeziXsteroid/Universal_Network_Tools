@@ -21,7 +21,7 @@ QJsonObject deepMerge(const QJsonObject& base, const QJsonObject& overlay) {
     return result;
 }
 
-}
+} // namespace
 
 SettingsService::SettingsService(QObject* parent)
     : QObject(parent) {
@@ -182,4 +182,4 @@ QJsonObject SettingsService::defaultConfig() {
     };
 }
 
-}
+} // namespace nt

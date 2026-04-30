@@ -18,4 +18,4 @@ public:
     static void ensureRuntimeTree();
 };
 
-}
+} // namespace nt

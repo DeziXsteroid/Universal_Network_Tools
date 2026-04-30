@@ -52,4 +52,4 @@ QString TerminalSanitizer::sanitizeTerminalText(const QString& input) {
     return filtered;
 }
 
-}
+} // namespace nt

@@ -200,4 +200,4 @@ void SshProcessSession::handleProcessText(const QString& text) {
     emit outputReady(text);
 }
 
-}
+} // namespace nt

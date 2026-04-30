@@ -65,4 +65,4 @@ bool TcpClientSession::isConnected() const {
     return m_socket->state() == QAbstractSocket::ConnectedState;
 }
 
-}
+} // namespace nt

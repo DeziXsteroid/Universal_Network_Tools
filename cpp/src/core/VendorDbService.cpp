@@ -31,7 +31,28 @@ QStringList candidateUrls() {
     };
 }
 
+QString normalizeVendorLabel(QString shortVendor, QString longVendor) {
+    shortVendor = shortVendor.simplified();
+    longVendor = longVendor.simplified();
+
+    if (longVendor.isEmpty()) {
+        return shortVendor;
+    }
+    if (shortVendor.isEmpty()) {
+        return longVendor;
+    }
+    if (longVendor.compare(shortVendor, Qt::CaseInsensitive) == 0) {
+        return longVendor;
+    }
+    if (longVendor.startsWith(shortVendor + QLatin1Char(' '), Qt::CaseInsensitive)
+        || longVendor.startsWith(shortVendor + QLatin1Char(','), Qt::CaseInsensitive)
+        || longVendor.startsWith(shortVendor + QLatin1Char('.'), Qt::CaseInsensitive)) {
+        return longVendor;
+    }
+    return longVendor;
 }
+
+} // namespace
 
 VendorDbService::VendorDbService(QObject* parent)
     : QObject(parent) {
@@ -237,24 +258,41 @@ bool VendorDbService::parseManuf(const QByteArray& data) {
     m_byBits.clear();
     const QList<QByteArray> lines = data.split('\n');
     for (const auto& rawLine : lines) {
-        const QString line = QString::fromUtf8(rawLine).trimmed();
+        const QString line = QString::fromUtf8(rawLine).section(QLatin1Char('#'), 0, 0).trimmed();
         if (line.isEmpty() || line.startsWith(QLatin1Char('#'))) {
             continue;
         }
-        const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-        if (parts.size() < 2) {
+
+        QString prefixToken;
+        QString shortVendor;
+        QString longVendor;
+
+        const QStringList tabParts = line.split(QRegularExpression(QStringLiteral("\\t+")), Qt::SkipEmptyParts);
+        if (tabParts.size() >= 2) {
+            prefixToken = tabParts.at(0).trimmed();
+            shortVendor = tabParts.at(1).trimmed();
+            longVendor = tabParts.value(2).trimmed();
+        } else {
+            const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+            if (parts.size() < 2) {
+                continue;
+            }
+            prefixToken = parts.at(0).trimmed();
+            shortVendor = parts.at(1).trimmed();
+            longVendor = parts.mid(2).join(QLatin1Char(' ')).trimmed();
+        }
+
+        if (prefixToken.isEmpty() || shortVendor.isEmpty()) {
             continue;
         }
 
         quint64 prefixValue = 0;
         int bits = -1;
-        if (!parsePrefixToken(parts.at(0), prefixValue, bits)) {
+        if (!parsePrefixToken(prefixToken, prefixValue, bits)) {
             continue;
         }
 
-        const QString vendor = (parts.size() >= 3
-            ? parts.mid(2).join(QLatin1Char(' '))
-            : parts.at(1)).trimmed();
+        const QString vendor = normalizeVendorLabel(shortVendor, longVendor).trimmed();
         if (vendor.isEmpty()) {
             continue;
         }
@@ -267,7 +305,7 @@ bool VendorDbService::parseManuf(const QByteArray& data) {
 QString VendorDbService::lookupVendor(const QString& mac) const {
     const QString normalized = normalizeMac(mac);
     if (normalized.isEmpty() || !m_loaded) {
-        return QStringLiteral("unknow vendor");
+        return QStringLiteral("unknown vendor");
     }
 
     QString hex = normalized;
@@ -275,7 +313,7 @@ QString VendorDbService::lookupVendor(const QString& mac) const {
     bool ok = false;
     const quint64 full = hex.toULongLong(&ok, 16);
     if (!ok) {
-        return QStringLiteral("unknow vendor");
+        return QStringLiteral("unknown vendor");
     }
 
     QList<int> bitWidths = m_byBits.keys();
@@ -289,7 +327,7 @@ QString VendorDbService::lookupVendor(const QString& mac) const {
         }
     }
 
-    return QStringLiteral("unknow vendor");
+    return QStringLiteral("unknown vendor");
 }
 
 QString VendorDbService::statusText() const {
@@ -300,4 +338,4 @@ QString VendorDbService::dbPath() const {
     return AppPaths::vendorDbPath();
 }
 
-}
+} // namespace nt

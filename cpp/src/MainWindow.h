@@ -196,6 +196,7 @@ private:
     QTimer* m_scanAutoScanTimer {nullptr};
     QMap<QString, QLabel*> m_hostLabels;
     QList<nt::ScanRecord> m_scanRows;
+    quint64 m_currentScanGeneration {0};
 
     QComboBox* m_requestMethodCombo {nullptr};
     QLineEdit* m_requestUrlEdit {nullptr};

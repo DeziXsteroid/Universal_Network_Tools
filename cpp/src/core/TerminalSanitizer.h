@@ -13,4 +13,4 @@ public:
     static QString sanitizeTerminalText(const QString& text);
 };
 
-}
+} // namespace nt

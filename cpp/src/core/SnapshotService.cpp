@@ -138,7 +138,7 @@ QMap<QString, ScanRecord> mapByIp(const QList<ScanRecord>& rows) {
     return mapped;
 }
 
-}
+} // namespace
 
 SnapshotService::SnapshotService(QObject* parent)
     : QObject(parent) {
@@ -326,4 +326,4 @@ SnapshotDiffSummary SnapshotService::diffRows(const QList<ScanRecord>& reference
     return summary;
 }
 
-}
+} // namespace nt

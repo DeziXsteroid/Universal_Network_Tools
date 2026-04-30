@@ -35,4 +35,4 @@ private:
     bool m_authRejected {false};
 };
 
-}
+} // namespace nt

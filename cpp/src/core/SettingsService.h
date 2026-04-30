@@ -40,4 +40,4 @@ private:
     QJsonObject m_config;
 };
 
-}
+} // namespace nt

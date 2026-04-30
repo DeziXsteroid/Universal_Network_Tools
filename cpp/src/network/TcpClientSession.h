@@ -31,4 +31,4 @@ private:
     bool m_keepAlive {false};
 };
 
-}
+} // namespace nt

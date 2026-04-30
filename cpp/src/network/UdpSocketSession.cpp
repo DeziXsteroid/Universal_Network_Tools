@@ -72,4 +72,4 @@ quint16 UdpSocketSession::localPort() const {
     return m_socket->localPort();
 }
 
-}
+} // namespace nt

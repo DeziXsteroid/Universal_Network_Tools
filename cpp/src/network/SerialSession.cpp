@@ -43,7 +43,7 @@ QSerialPort::FlowControl resolveFlowControl(const QString& flowControlName) {
     return QSerialPort::NoFlowControl;
 }
 
-}
+} // namespace
 
 SerialSession::SerialSession(QObject* parent)
     : QObject(parent)
@@ -106,4 +106,4 @@ bool SerialSession::isOpen() const {
     return m_port->isOpen();
 }
 
-}
+} // namespace nt

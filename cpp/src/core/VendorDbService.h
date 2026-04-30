@@ -32,4 +32,4 @@ private:
     QString m_status;
 };
 
-}
+} // namespace nt

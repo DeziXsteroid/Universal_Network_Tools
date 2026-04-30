@@ -27,4 +27,4 @@ private:
     QUdpSocket* m_socket {nullptr};
 };
 
-}
+} // namespace nt

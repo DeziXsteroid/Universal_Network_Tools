@@ -25,4 +25,4 @@ private:
     QNetworkAccessManager* m_manager {nullptr};
 };
 
-}
+} // namespace nt

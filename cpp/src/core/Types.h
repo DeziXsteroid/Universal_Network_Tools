@@ -64,6 +64,7 @@ struct ScanRecord {
     QString typeHint;
     QString name;
     bool onLink {false};
+    quint64 generation {0};
 };
 
 struct RangeSuggestion {
@@ -178,7 +179,7 @@ inline QList<SessionProfile> sessionProfilesFromJson(const QJsonArray& array, qu
     return profiles;
 }
 
-}
+} // namespace nt
 
 Q_DECLARE_METATYPE(nt::AdapterInfo)
 Q_DECLARE_METATYPE(nt::RangeSuggestion)

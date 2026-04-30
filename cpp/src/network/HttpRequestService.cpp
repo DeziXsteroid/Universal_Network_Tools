@@ -60,4 +60,4 @@ void HttpRequestService::send(const HttpRequestSpec& spec) {
     });
 }
 
-}
+} // namespace nt

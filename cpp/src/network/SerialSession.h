@@ -34,4 +34,4 @@ private:
     QSerialPort* m_port {nullptr};
 };
 
-}
+} // namespace nt

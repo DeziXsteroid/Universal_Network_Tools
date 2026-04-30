@@ -3,18 +3,19 @@
 #include "core/AppPaths.h"
 #include "core/VendorDbService.h"
 
-#include <QCoreApplication>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QHash>
 #include <QHostAddress>
 #include <QHostInfo>
+#include <QSet>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QNetworkInterface>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QThread>
 #include <QThreadPool>
 #include <QtConcurrent>
 
@@ -206,6 +207,44 @@ QString routeDisplayForHost(const AdapterInfo& adapter, const ScanRecord& row) {
     return QStringLiteral("-");
 }
 
+QList<QString> prioritizeIpsForScan(const QList<QString>& ips, const QHash<QString, QString>& knownMacs, const QString& gateway) {
+    if (ips.isEmpty()) {
+        return ips;
+    }
+
+    QList<QString> prioritized;
+    prioritized.reserve(ips.size());
+    QSet<QString> appended;
+
+    const auto tryAppend = [&](const QString& ip) {
+        if (!ip.isEmpty() && !appended.contains(ip) && ips.contains(ip)) {
+            prioritized.append(ip);
+            appended.insert(ip);
+        }
+    };
+
+    tryAppend(gateway);
+
+    QList<QString> knownIps;
+    knownIps.reserve(knownMacs.size());
+    for (auto it = knownMacs.constBegin(); it != knownMacs.constEnd(); ++it) {
+        if (ips.contains(it.key())) {
+            knownIps.append(it.key());
+        }
+    }
+    std::sort(knownIps.begin(), knownIps.end(), [](const QString& left, const QString& right) {
+        return QHostAddress(left).toIPv4Address() < QHostAddress(right).toIPv4Address();
+    });
+    for (const auto& ip : knownIps) {
+        tryAppend(ip);
+    }
+
+    for (const auto& ip : ips) {
+        tryAppend(ip);
+    }
+    return prioritized;
+}
+
 bool tryConnectPort(const QString& ip, quint16 port, int timeoutMs) {
 #ifdef Q_OS_WIN
     QTcpSocket socket;
@@ -289,12 +328,6 @@ NetworkScanService::NetworkScanService(VendorDbService* vendorDb, QObject* paren
     : QObject(parent)
     , m_vendorDb(vendorDb)
     , m_watcher(new QFutureWatcher<nt::ScanRecord>(this)) {
-    connect(m_watcher, &QFutureWatcher<nt::ScanRecord>::resultReadyAt, this, [this](int index) {
-        const auto record = m_watcher->resultAt(index);
-        if (!m_cancelRequested && !record.ip.isEmpty() && record.status != HostStatus::Offline) {
-            emit recordReady(record);
-        }
-    });
     connect(m_watcher, &QFutureWatcher<nt::ScanRecord>::finished, this, [this]() {
         QList<ScanRecord> records;
         const auto future = m_watcher->future();
@@ -381,7 +414,7 @@ RangeSuggestion NetworkScanService::suggestRange() const {
     return suggestion;
 }
 
-void NetworkScanService::start(const QString& startIp, const QString& endIp, const QString& adapterId, int maxWorkers) {
+void NetworkScanService::start(const QString& startIp, const QString& endIp, const QString& adapterId, int maxWorkers, quint64 generation) {
     if (isRunning()) {
         return;
     }
@@ -392,8 +425,9 @@ void NetworkScanService::start(const QString& startIp, const QString& endIp, con
         return;
     }
 
-    m_cancelRequested = false;
+    m_cancelRequested.store(false);
     m_startedMs = QDateTime::currentMSecsSinceEpoch();
+    m_activeGeneration.store(generation);
     QThreadPool::globalInstance()->setMaxThreadCount(qBound(8, maxWorkers, 96));
     m_activeAdapter = adapterById(adapterId);
     const auto adapter = m_activeAdapter;
@@ -401,48 +435,31 @@ void NetworkScanService::start(const QString& startIp, const QString& endIp, con
     m_cachedGateway = detectGateway(adapter);
     m_cachedMask = detectMask(adapter);
     m_prefetchedMacs = captureArpTable(adapter.id);
-    QList<QString> prefetchedIps = m_prefetchedMacs.keys();
-    std::sort(prefetchedIps.begin(), prefetchedIps.end(), [](const auto& left, const auto& right) {
-        return QHostAddress(left).toIPv4Address() < QHostAddress(right).toIPv4Address();
-    });
-    for (const auto& ip : prefetchedIps) {
-        ScanRecord provisional;
-        provisional.ip = ip;
-        provisional.mac = m_prefetchedMacs.value(ip, QStringLiteral("-"));
-        provisional.vendor = m_vendorDb != nullptr ? m_vendorDb->lookupVendor(provisional.mac) : QStringLiteral("unknown vendor");
-        provisional.gateway = m_cachedGateway;
-        provisional.mask = m_cachedMask;
-        provisional.onLink = isOnLink(ip, adapter);
-        provisional.name = routeDisplayForHost(adapter, provisional);
-        provisional.status = HostStatus::Unknown;
-        provisional.pingDisplay = QStringLiteral("[n/a]");
-        provisional.port = QStringLiteral("-");
-        provisional.typeHint = QStringLiteral("Хост");
-        emit recordReady(provisional);
-    }
-    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    m_prefetchedPingDisplay.clear();
+    const auto scheduledIps = prioritizeIpsForScan(ips, m_prefetchedMacs, m_cachedGateway);
 
-    m_prefetchedPingDisplay = sweepPingRange(startIp, endIp, adapter);
-    if (m_prefetchedPingDisplay.isEmpty() && !prefetchedIps.isEmpty()) {
-        for (const auto& ip : prefetchedIps) {
-            const auto ping = pingHost(ip, adapter.ip);
-            if (ping.success && !ping.display.isEmpty()) {
-                m_prefetchedPingDisplay.insert(ip, ping.display);
-            }
-        }
-    }
-
-    auto future = QtConcurrent::mapped(ips, [this, adapter](const QString& ip) {
-        if (m_cancelRequested) {
+    auto future = QtConcurrent::mapped(scheduledIps, [this, adapter](const QString& ip) {
+        if (m_cancelRequested.load()) {
             return ScanRecord{};
         }
-        return probeHost(ip, adapter);
+        auto record = probeHost(ip, adapter);
+        if (!m_cancelRequested.load()
+            && !record.ip.isEmpty()
+            && record.status != HostStatus::Offline
+            && record.generation == m_activeGeneration.load()) {
+            QMetaObject::invokeMethod(this, [this, record]() {
+                if (!m_cancelRequested.load() && record.generation == m_activeGeneration.load()) {
+                    emit recordReady(record);
+                }
+            }, Qt::QueuedConnection);
+        }
+        return record;
     });
     m_watcher->setFuture(future);
 }
 
 void NetworkScanService::cancel() {
-    m_cancelRequested = true;
+    m_cancelRequested.store(true);
 }
 
 bool NetworkScanService::isRunning() const {
@@ -462,6 +479,7 @@ AdapterInfo NetworkScanService::adapterById(const QString& adapterId) const {
 ScanRecord NetworkScanService::probeHost(const QString& ip, const AdapterInfo& adapter) {
     ScanRecord row;
     row.ip = ip;
+    row.generation = m_activeGeneration.load();
     row.gateway = m_cachedGateway;
     row.mask = m_cachedMask;
     row.onLink = isOnLink(ip, adapter);
@@ -478,37 +496,53 @@ ScanRecord NetworkScanService::probeHost(const QString& ip, const AdapterInfo& a
     if (prefetchedPing != m_prefetchedPingDisplay.constEnd()) {
         ping.success = true;
         ping.display = prefetchedPing.value();
-    }
-#if !defined(Q_OS_MACOS)
-    else if (m_prefetchedPingDisplay.isEmpty()) {
+    } else {
         ping = pingHost(ip, adapter.ip);
     }
-#endif
     row.pingDisplay = ping.display.isEmpty() ? QStringLiteral("[n/a]") : ping.display;
     row.mac = m_prefetchedMacs.value(ip, QStringLiteral("-"));
 
     QStringList openPorts;
     bool portsScanned = false;
+    if (!ping.success && row.onLink && !row.mac.isEmpty() && row.mac != QStringLiteral("-")) {
+        ping = retryPingHost(ip, adapter.ip, 3000, 220);
+        if (ping.success) {
+            row.pingDisplay = ping.display;
+        }
+    }
+
+    if (!ping.success) {
+        openPorts = probeOpenPorts(ip);
+        portsScanned = true;
+        if ((row.mac.isEmpty() || row.mac == QStringLiteral("-")) && (!openPorts.isEmpty() || row.onLink)) {
+            row.mac = lookupMac(ip);
+        }
+        if (!ping.success && (!openPorts.isEmpty() || (!row.mac.isEmpty() && row.mac != QStringLiteral("-")))) {
+            ping = retryPingHost(ip, adapter.ip, 3000, 220);
+            if (ping.success) {
+                row.pingDisplay = ping.display;
+            }
+        }
+    }
+
     if (ping.success) {
         row.status = HostStatus::Online;
     } else if (row.onLink && !row.mac.isEmpty() && row.mac != QStringLiteral("-")) {
         row.status = HostStatus::Unknown;
+    } else if (!openPorts.isEmpty()) {
+        row.status = HostStatus::Unknown;
     } else {
-        openPorts = probeOpenPorts(ip);
-        portsScanned = true;
-        if (!openPorts.isEmpty() || (!row.mac.isEmpty() && row.mac != QStringLiteral("-"))) {
-            row.status = HostStatus::Unknown;
-        } else {
-            row.status = HostStatus::Offline;
-        }
+        row.status = HostStatus::Offline;
     }
 
-    if (row.status == HostStatus::Offline || m_cancelRequested) {
+    if (row.status == HostStatus::Offline || m_cancelRequested.load()) {
         return row;
     }
-
     if (!portsScanned) {
         openPorts = probeOpenPorts(ip);
+    }
+    if ((row.mac.isEmpty() || row.mac == QStringLiteral("-")) && (ping.success || !openPorts.isEmpty() || row.onLink)) {
+        row.mac = lookupMac(ip);
     }
     if (!openPorts.isEmpty()) {
         row.portsDisplay = openPorts.join(QLatin1Char(','));
@@ -523,6 +557,18 @@ ScanRecord NetworkScanService::probeHost(const QString& ip, const AdapterInfo& a
     row.typeHint = QStringLiteral("Хост");
     row.speed = ping.success ? QStringLiteral("icmp") : QStringLiteral("link");
     return row;
+}
+
+NetworkScanService::PingResult NetworkScanService::retryPingHost(const QString& ip, const QString& sourceIp, int windowMs, int intervalMs) {
+    const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + qMax(500, windowMs);
+    while (QDateTime::currentMSecsSinceEpoch() < deadline) {
+        const auto ping = pingHost(ip, sourceIp);
+        if (ping.success && !ping.display.trimmed().isEmpty()) {
+            return ping;
+        }
+        QThread::msleep(static_cast<unsigned long>(qMax(80, intervalMs)));
+    }
+    return {};
 }
 
 bool NetworkScanService::isVpnName(const QString& name) {

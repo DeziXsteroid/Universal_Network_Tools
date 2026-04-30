@@ -1144,7 +1144,7 @@ QWidget* MainWindow::createScanPage() {
             stopScan();
         } else {
             animateScanButtonPulse();
-            QTimer::singleShot(45, this, &MainWindow::startScan);
+            QTimer::singleShot(30, this, &MainWindow::startScan);
         }
     });
     connect(m_scanStopButton, &QPushButton::clicked, this, &MainWindow::stopScan);
@@ -1926,6 +1926,7 @@ void MainWindow::resolveHostnameRange() {
 
 void MainWindow::startScan() {
     syncCurrentPage(0);
+    ++m_currentScanGeneration;
     if (m_scanAutoIpCheck != nullptr && m_scanAutoIpCheck->isChecked()) {
         applyRangeFromCurrentAdapter();
     }
@@ -1943,7 +1944,8 @@ void MainWindow::startScan() {
         m_scanStartIp->text().trimmed(),
         m_scanEndIp->text().trimmed(),
         m_scanAdapterCombo->currentData().toString(),
-        m_settings->scanWorkers()
+        m_settings->scanWorkers(),
+        m_currentScanGeneration
     );
 }
 
@@ -2136,7 +2138,7 @@ int MainWindow::findRowByIp(QTableWidget* table, const QString& ip) {
 }
 
 void MainWindow::appendScanRecord(const nt::ScanRecord& record) {
-    if (record.ip.isEmpty()) {
+    if (record.ip.isEmpty() || record.generation != m_currentScanGeneration) {
         return;
     }
 
@@ -2205,20 +2207,18 @@ void MainWindow::appendScanRecord(const nt::ScanRecord& record) {
 }
 
 void MainWindow::finalizeScan(const QList<nt::ScanRecord>& records, int durationMs) {
+    if (!records.isEmpty() && records.first().generation != m_currentScanGeneration) {
+        return;
+    }
     QList<nt::ScanRecord> sortedRecords = records;
     std::sort(sortedRecords.begin(), sortedRecords.end(), [](const nt::ScanRecord& left, const nt::ScanRecord& right) {
         return ipToInt(left.ip) < ipToInt(right.ip);
     });
-    if (m_scanTable != nullptr) {
-        m_scanTable->setUpdatesEnabled(false);
-        m_scanTable->setRowCount(0);
-    }
     m_scanRows.clear();
     for (const auto& record : sortedRecords) {
         appendScanRecord(record);
     }
     if (m_scanTable != nullptr) {
-        m_scanTable->setUpdatesEnabled(true);
         m_scanTable->viewport()->update();
     }
     if (m_scanStartButton != nullptr) {
@@ -2368,7 +2368,6 @@ void MainWindow::sendHttpRequest() {
         {QStringLiteral("params"), m_requestParamsEdit->toPlainText()},
         {QStringLiteral("body"), m_requestBodyEdit->toPlainText()},
         {QStringLiteral("username"), spec.username},
-        {QStringLiteral("password"), spec.password},
         {QStringLiteral("timeout"), spec.timeoutSec},
     };
     QJsonArray compacted;
@@ -2440,7 +2439,7 @@ void MainWindow::openHttpHistory() {
         m_requestParamsEdit->setPlainText(object.value(QStringLiteral("params")).toString());
         m_requestBodyEdit->setPlainText(object.value(QStringLiteral("body")).toString());
         m_requestUserEdit->setText(object.value(QStringLiteral("username")).toString());
-        m_requestPassEdit->setText(object.value(QStringLiteral("password")).toString());
+        m_requestPassEdit->clear();
         m_requestTimeoutSpin->setValue(object.value(QStringLiteral("timeout")).toInt(10));
         dialog.accept();
     };

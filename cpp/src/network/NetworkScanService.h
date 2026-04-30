@@ -4,6 +4,7 @@
 
 #include <QStringList>
 
+#include <atomic>
 #include <QFutureWatcher>
 #include <QHash>
 #include <QObject>
@@ -22,7 +23,7 @@ public:
     QList<AdapterInfo> adapters() const;
     RangeSuggestion suggestRange() const;
 
-    void start(const QString& startIp, const QString& endIp, const QString& adapterId, int maxWorkers);
+    void start(const QString& startIp, const QString& endIp, const QString& adapterId, int maxWorkers, quint64 generation);
     void cancel();
     bool isRunning() const;
 
@@ -39,6 +40,7 @@ private:
     };
 
     ScanRecord probeHost(const QString& ip, const AdapterInfo& adapter);
+    static PingResult retryPingHost(const QString& ip, const QString& sourceIp, int windowMs, int intervalMs);
     static bool isVpnName(const QString& name);
     static QList<QString> expandRange(const QString& startIp, const QString& endIp);
     static quint32 ipToInt(const QString& ip);
@@ -57,8 +59,9 @@ private:
 
     VendorDbService* m_vendorDb {nullptr};
     QFutureWatcher<nt::ScanRecord>* m_watcher {nullptr};
-    bool m_cancelRequested {false};
+    std::atomic_bool m_cancelRequested {false};
     qint64 m_startedMs {0};
+    std::atomic<quint64> m_activeGeneration {0};
     AdapterInfo m_activeAdapter;
     QString m_cachedGateway;
     QString m_cachedMask;
@@ -66,4 +69,4 @@ private:
     QHash<QString, QString> m_prefetchedMacs;
 };
 
-}
+} // namespace nt

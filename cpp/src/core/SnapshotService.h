@@ -26,4 +26,4 @@ public:
     SnapshotDiffSummary diffRows(const QList<ScanRecord>& referenceRows, const QList<ScanRecord>& currentRows) const;
 };
 
-}
+} // namespace nt

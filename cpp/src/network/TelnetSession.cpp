@@ -80,4 +80,4 @@ void TelnetSession::handlePrompt(const QString& text) {
     }
 }
 
-}
+} // namespace nt

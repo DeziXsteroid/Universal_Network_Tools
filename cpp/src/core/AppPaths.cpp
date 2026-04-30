@@ -63,4 +63,4 @@ void AppPaths::ensureRuntimeTree() {
     QDir().mkpath(logsDir());
 }
 
-}
+} // namespace nt
